@@ -17,6 +17,30 @@
 (import "coilgui.model" :use *)
 (import "coilgui.util" :use *)
 
+;; The pane geometry, derived from the window rather than declared. Drawing and
+;; hit testing both take one of these, which is what keeps a click and the thing
+;; it appears to be on from drifting apart when the window is resized.
+(defstruct Panes [(w f64) (h f64) (rail f64) (graph f64) (convo-x f64) (convo f64)])
+
+(defn panes [(w f64) (h f64)] (-> Panes)
+  (let [p (alloc/stack Panes)
+        rail RAIL_W
+        wide (- w rail)
+        ;; The conversation takes a share of what is left, within bounds: narrow
+        ;; enough and the graph has no room, wide enough and prose stops wrapping
+        ;; at a readable measure.
+        convo
+          (cond (< (* wide 0.42) 360.0) (if (< wide 720.0) (* wide 0.5) 360.0)
+                (> (* wide 0.42) 620.0) 620.0
+                :else (* wide 0.42))]
+    (set! (field p w) w)
+    (set! (field p h) h)
+    (set! (field p rail) rail)
+    (set! (field p graph) (- wide convo))
+    (set! (field p convo-x) (+ rail (- wide convo)))
+    (set! (field p convo) convo)
+    (load p)))
+
 (const COL_GAP 150.0)
 (const ROW_GAP 64.0)
 
@@ -195,7 +219,7 @@
           0)
         (+ at (+ (text-row! cv (field cv f11) at top 42.0 c label) 4.0)))))
 
-(defn draw-graph! [(cv (ptr Canvas)) (app (ptr App)) (x f64) (w f64) (h f64)] (-> i64)
+(defn draw-graph! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (x f64) (w f64) (h f64)] (-> i64)
   (let [n (step-count app)
         x0 (+ x 36.0)
         rows (+ 1 (max-row app))
@@ -394,7 +418,7 @@
 ;; The conversation is anchored to the bottom, like a terminal: a replayed run
 ;; is hundreds of lines and the part worth reading is the end of it. When it
 ;; fits, it sits at the top as normal.
-(defn draw-convo! [(cv (ptr Canvas)) (app (ptr App)) (x f64) (w f64) (h f64)] (-> i64)
+(defn draw-convo! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (x f64) (w f64) (h f64)] (-> i64)
   (let [n (al-len [Line] (.lines app))
         top (+ HEADER 22.0)
         bottom (- h 66.0)
@@ -452,27 +476,29 @@
     (text-row! cv (field cv f11) (+ x 12.0) y 22.0 (amber) label)
     x))
 
-(defn draw-header! [(cv (ptr Canvas)) (app (ptr App)) (w f64) (split bool) (graph-w f64)] (-> i64)
+(defn draw-header! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (split bool)] (-> i64)
   (let [n (step-count app)
         started
           (> (+ (count-in-state app "running")
                 (+ (count-in-state app "done")
                    (+ (count-in-state app "failed") (count-in-state app "asks"))))
              0)
-        title (.title app)]
+        title (.title app)
+        w (.w p)
+        graph-w (.graph p)]
     (hline! cv 0.0 (- HEADER HAIRLINE) w (line))
     (text-row! cv (field cv m13) GUTTER_RAIL 0.0 HEADER (ink1) "coil")
     (text-row! cv
                (field cv f11)
-               (text-right (field cv f11) (- RAIL_W GUTTER_RAIL) "⌘K")
+               (text-right (field cv f11) (- (.rail p) GUTTER_RAIL) "⌘K")
                0.0
                HEADER
                (ink3)
                "⌘K")
     (if (not split)
-        (do (text-row! cv (field cv f13) (+ RAIL_W GUTTER_PANE) 0.0 HEADER (ink3) title) 0)
-        (let [mid-right (+ RAIL_W graph-w)]
-          (text-elided! cv (field cv m13) (+ RAIL_W GUTTER_PANE) 0.0 HEADER 320.0 (ink1) title)
+        (do (text-row! cv (field cv f13) (+ (.rail p) GUTTER_PANE) 0.0 HEADER (ink3) title) 0)
+        (let [mid-right (+ (.rail p) graph-w)]
+          (text-elided! cv (field cv m13) (+ (.rail p) GUTTER_PANE) 0.0 HEADER (- graph-w 180.0) (ink1) title)
           (if (and (> n 0) (not started))
               (do (run-button! cv (- mid-right GUTTER_PANE) 0.0 (join3 "Run " (dec-str n) " steps") (.hover-run app)) 0)
               (do
@@ -538,7 +564,7 @@
 
 ;; A new workflow is one prompt in the middle of the window. The panes appear
 ;; when there is something to put in them, not before.
-(defn draw-new! [(cv (ptr Canvas)) (app (ptr App)) (x f64) (w f64) (h f64)] (-> i64)
+(defn draw-new! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (x f64) (w f64) (h f64)] (-> i64)
   (let [box-w 620.0
         left (+ x (/ (- w box-w) 2.0))
         top (- (/ h 2.0) 110.0)
@@ -572,23 +598,24 @@
 
 (defn draw-app! [(cv (ptr Canvas)) (app (ptr App)) (w f64) (h f64)] (-> i64)
   (let [split (> (step-count app) 0)
-        graph-w GRAPH_W
-        convo-x (+ RAIL_W graph-w)]
+        geom (alloc/stack Panes)]
+    (set! geom (panes w h))
     (fill! cv 0.0 0.0 w h (ground))
     (if split
         (do
-          (draw-graph! cv app RAIL_W graph-w h)
-          (draw-convo! cv app convo-x (- w convo-x) h)
+          (draw-graph! cv app geom (.rail geom) (.graph geom) h)
+          (draw-convo! cv app geom (.convo-x geom) (.convo geom) h)
           0)
-        (draw-new! cv app RAIL_W (- w RAIL_W) h))
+        (draw-new! cv app geom (.rail geom) (- w (.rail geom)) h))
     (draw-rail! cv app h)
-    (draw-header! cv app w split graph-w)
+    (draw-header! cv app geom split)
     0))
 
 ;; ---------------------------------------------------------------- hit testing
 ;;
-;; These mirror the loops above. They are the only other place that knows where
-;; a row or a node lands, which is why both take the same inputs the draw does.
+;; These mirror the drawing above and take the same Panes, which is what keeps a
+;; click and the thing it looks like it landed on from drifting apart when the
+;; window is resized.
 
 (defn rail-hit [(app (ptr App)) (y f64)] (-> i64)
   (let [n (al-len [Item] (.items app))
@@ -600,26 +627,24 @@
               (let [it (al-elem [Item] (field app items) (load i))]
                 (if (.head it)
                     (do
-                      (when (> (load i) 0)
-                        (store! top (+ (load top) 14.0))
-                        0)
+                      (when (> (load i) 0) (set! top (+ (load top) 14.0)) 0)
                       (set! top (+ (load top) 26.0))
                       0)
                     (do
                       (when (and (>= y (load top)) (< y (+ (load top) ROW)))
-                        (store! found (load i))
+                        (set! found (load i))
                         0)
                       (set! top (+ (load top) ROW))
                       0))
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-(defn node-hit [(app (ptr App)) (px f64) (py f64) (h f64)] (-> i64)
+(defn node-hit [(app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> i64)
   (let [n (step-count app)
-        x0 (+ RAIL_W 36.0)
+        x0 (+ (.rail p) 36.0)
         rows (+ 1 (max-row app))
-        block (- (* ROW_GAP (primitive/cast f64 rows)) (- ROW_GAP NODE_H))
-        y0 (+ HEADER (/ (- (- (- h HEADER) 42.0) block) 2.0))
+        block (- (* ROW_GAP (cast f64 rows)) (- ROW_GAP NODE_H))
+        y0 (+ HEADER (/ (- (- (- (.h p) HEADER) 42.0) block) 2.0))
         (mut i) 0
         (mut found) -1]
     (loop (if (or (>= (load i) n) (>= (load found) 0))
@@ -629,18 +654,18 @@
                     ny (node-y y0 (.row s))]
                 (when (and (and (>= px nx) (< px (+ nx NODE_W)))
                            (and (>= py ny) (< py (+ ny NODE_H))))
-                  (store! found (load i))
+                  (set! found (load i))
                   0)
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-;; The Run control is the only click target in the header, and it exists only
-;; while there is a plan that has not started.
-(defn run-hit [(cv (ptr Canvas)) (app (ptr App)) (px f64) (py f64)] (-> bool)
+;; The Run control is the only target in the header, and it exists only while
+;; there is a plan that has not started.
+(defn run-hit [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> bool)
   (if (or (= (step-count app) 0) (started? app))
       false
       (let [label (join3 "Run " (dec-str (step-count app)) " steps")
             w (+ (text-width (field cv f11) label) 24.0)
-            right (- (+ RAIL_W GRAPH_W) GUTTER_PANE)]
+            right (- (+ (.rail p) (.graph p)) GUTTER_PANE)]
         (and (and (>= px (- right w)) (< px right))
              (and (>= py 13.0) (< py 35.0))))))

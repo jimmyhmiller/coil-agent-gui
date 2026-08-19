@@ -171,6 +171,23 @@
   (set! (field cv alpha) a)
   0)
 
+;; Point the canvas at a new bitmap, without paying to re-read the fonts. The
+;; window does this on every resize, so it happens while the mouse is moving.
+(defn canvas-resize! [(cv (ptr Canvas)) (ctx (ptr i8)) (height f64) (scale f64)] (-> i64)
+  (let [flip (alloc/stack CGAffine)]
+    (CGContextScaleCTM ctx scale scale)
+    (set! (.ctx cv) ctx)
+    (set! (.height cv) height)
+    (set! (.alpha cv) 1.0)
+    (set! (.a flip) 1.0)
+    (set! (.b flip) 0.0)
+    (set! (.c flip) 0.0)
+    (set! (.d flip) 1.0)
+    (set! (.tx flip) 0.0)
+    (set! (.ty flip) 0.0)
+    (CGContextSetTextMatrix ctx (load flip))
+    0))
+
 (defn set-fill! [(cv (ptr Canvas)) (c Color)] (-> i64)
   (CGContextSetRGBFillColor (.ctx cv)
                             (.r c)
