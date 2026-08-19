@@ -12,11 +12,16 @@
 (import "coilgui.ffi" :use *)
 (import "coilgui.theme" :use *)
 
-(defstruct Face [(font (ptr i8)) (adv f64) (ascent f64) (descent f64)])
+;; `fb` is the fallback face for codepoints this one has no glyph for. IBM Plex
+;; Mono carries no ⌘, ⏎, ⇧, ● or ❯; Menlo does, is monospaced, and is on every
+;; Mac. Falling back per glyph is what a text stack does anyway — the alternative
+;; is drawing letterforms by hand, which is worse at every size.
+(defstruct Face [(font (ptr i8)) (fb (ptr i8)) (adv f64) (ascent f64) (descent f64)])
 
 (defstruct Canvas
   [(ctx (ptr i8))
    (height f64)
+   (alpha f64)
    (f11 Face)
    (f12 Face)
    (f13 Face)
@@ -30,6 +35,16 @@
 (defn spots [] (-> (ptr (array CGPoint 512)))
   (alloc/static (array CGPoint 512)))
 
+;; A second set of buffers for the fallback pass: the codepoints the primary
+;; face has no glyph for, and where they go.
+(defn units-fb [] (-> (ptr (array u16 512)))
+  (alloc/static (array u16 512)))
+
+(defn glyphs-fb [] (-> (ptr (array u16 512)))
+  (alloc/static (array u16 512)))
+
+(defn spots-fb [] (-> (ptr (array CGPoint 512)))
+  (alloc/static (array CGPoint 512)))
 ;; UTF-8 to UTF-16, BMP only: the interface uses a fixed set of glyphs and none
 ;; of them is above U+FFFF. Anything that is becomes U+FFFD rather than a
 ;; silently malformed surrogate. Returns the unit count.
@@ -91,6 +106,11 @@
 (defn text-right [(face (ptr Face)) (right f64) (text (slice u8))] (-> f64)
   (- right (text-width face text)))
 
+(extern CTFontCreateWithName :cc c [(ptr i8) f64 (ptr i8)] (-> (ptr i8)))
+
+(defn named-font [(name (ptr i8)) (size f64)] (-> (ptr i8))
+  (CTFontCreateWithName (CFStringCreateWithCString (nil-ptr) name CF_UTF8) size (nil-ptr)))
+
 (defn face-load [(path (ptr i8)) (size f64)] (-> Face)
   (let [face (alloc/stack Face)
         cf (CFStringCreateWithCString (nil-ptr) path CF_UTF8)
@@ -99,6 +119,7 @@
     (if (null? descs)
         (do
           (set! (.font face) (nil-ptr))
+          (set! (.fb face) (nil-ptr))
           (load face))
         (let [font (CTFontCreateWithFontDescriptor (CFArrayGetValueAtIndex descs 0) size (nil-ptr))
               count (to-utf16 "M")
@@ -106,6 +127,7 @@
               g (primitive/cast (ptr u16) (glyphs))]
           (CTFontGetGlyphsForCharacters font u g count)
           (set! (.font face) font)
+          (set! (.fb face) (named-font c"Menlo" size))
           (set! (.adv face) (CTFontGetAdvancesForGlyphs font 0 g (primitive/cast (ptr CGSize) 0) 1))
           (set! (.ascent face) (CTFontGetAscent font))
           (set! (.descent face) (CTFontGetDescent font))
@@ -118,6 +140,7 @@
     (CGContextScaleCTM ctx scale scale)
     (set! (.ctx cv) ctx)
     (set! (.height cv) height)
+    (set! (.alpha cv) 1.0)
     (set! (.f11 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 11.0))
     (set! (.f12 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 12.0))
     (set! (.f13 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 13.0))
@@ -132,19 +155,25 @@
     (CGContextSetTextMatrix ctx (load flip))
     (if (null? (.font (field cv f13))) 1 0)))
 
+;; Every colour is multiplied by the canvas alpha, so a whole region fades by
+;; setting one number rather than by threading an alpha through every call.
+(defn canvas-alpha! [(cv (ptr Canvas)) (a f64)] (-> i64)
+  (set! (field cv alpha) a)
+  0)
+
 (defn set-fill! [(cv (ptr Canvas)) (c Color)] (-> i64)
   (CGContextSetRGBFillColor (.ctx cv)
                             (.r c)
                             (.g c)
                             (.b c)
-                            1.0))
+                            (.alpha cv)))
 
 (defn set-stroke! [(cv (ptr Canvas)) (c Color)] (-> i64)
   (CGContextSetRGBStrokeColor (.ctx cv)
                               (.r c)
                               (.g c)
                               (.b c)
-                              1.0))
+                              (.alpha cv)))
 
 ;; Top-down y to CoreGraphics' bottom-up origin.
 (defn flip-y [(cv (ptr Canvas)) (y f64) (h f64)] (-> f64)
@@ -225,7 +254,36 @@
                 (set! (.y slot) y)
                 (set! i (+ (load i) 1)))))
     (set-fill! cv c)
-    (CTFontDrawGlyphs font g p count (.ctx cv))
+    ;; Split the run into what this face can draw and what it cannot, keeping
+    ;; every glyph on the same monospaced grid, then draw at most two runs. A
+    ;; glyph id of zero is .notdef, which is the box everyone has seen.
+    (let [ufb (primitive/cast (ptr u16) (units-fb))
+          gfb (primitive/cast (ptr u16) (glyphs-fb))
+          pfb (primitive/cast (ptr CGPoint) (spots-fb))
+          (mut kept) 0
+          (mut missing) 0
+          (mut k) 0]
+      (loop (if (>= (load k) count)
+                (break)
+                (let [gl (load (primitive/index g (load k)))
+                      pos (load (primitive/index p (load k)))]
+                  (if (= (primitive/cast i64 gl) 0)
+                      (do
+                        (set! (primitive/index ufb (load missing)) (load (primitive/index u (load k))))
+                        (set! (primitive/index pfb (load missing)) pos)
+                        (set! missing (+ (load missing) 1)))
+                      (do
+                        (set! (primitive/index g (load kept)) gl)
+                        (set! (primitive/index p (load kept)) pos)
+                        (set! kept (+ (load kept) 1))))
+                  (set! k (+ (load k) 1)))))
+      (when (> (load kept) 0)
+        (CTFontDrawGlyphs font g p (load kept) (.ctx cv))
+        0)
+      (when (and (> (load missing) 0) (not (null? (.fb face))))
+        (CTFontGetGlyphsForCharacters (.fb face) ufb gfb (load missing))
+        (CTFontDrawGlyphs (.fb face) gfb pfb (load missing) (.ctx cv))
+        0))
     (* adv (primitive/cast f64 count))))
 
 (defn text-at! [(cv (ptr Canvas)) (face (ptr Face)) (x f64) (baseline f64) (c Color) (text (slice u8))] (-> f64)

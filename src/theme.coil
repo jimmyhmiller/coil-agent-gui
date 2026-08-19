@@ -49,3 +49,35 @@
 (const GUTTER_PANE 22.0)
 (const HAIRLINE 1.0)
 (const LINE_H 22.0)
+
+;; Easing. Motion in this interface is short and decelerating: things arrive and
+;; settle, nothing bounces, and nothing moves that the user did not cause.
+(defn clamp01 [(x f64)] (-> f64)
+  (if (< x 0.0) 0.0 (if (> x 1.0) 1.0 x)))
+
+(defn ease-out [(t f64)] (-> f64)
+  (let [u (- 1.0 (clamp01 t))]
+    (- 1.0 (* u (* u u)))))
+
+;; Progress through an animation that began at `start` and lasts `span`.
+(defn phase [(now f64) (start f64) (span f64)] (-> f64)
+  (if (<= start 0.0) 1.0 (clamp01 (/ (- now start) span))))
+
+(defn lerp [(a f64) (b f64) (t f64)] (-> f64)
+  (+ a (* (- b a) t)))
+
+(defn mix [(a Color) (b Color) (t f64)] (-> Color)
+  (let [c (alloc/stack Color)]
+    (set! (field c r) (lerp (.r a) (.r b) t))
+    (set! (field c g) (lerp (.g a) (.g b) t))
+    (set! (field c b) (lerp (.b a) (.b b) t))
+    (load c)))
+
+(const ANIM_FAST 0.18)
+(const ANIM_STEP 0.32)
+(const BLINK 0.56)
+
+;; The hover wash. Barely there on purpose: it says "this row is a target", not
+;; "this row is selected".
+(defn hover-wash [] (-> Color)
+  (col 23 22 19))

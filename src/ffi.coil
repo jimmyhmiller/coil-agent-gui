@@ -58,6 +58,9 @@
 (extern CTFontGetDescent :cc c [(ptr i8)] (-> f64))
 (extern CTFontDrawGlyphs :cc c [(ptr i8) (ptr u16) (ptr CGPoint) i64 (ptr i8)] (-> i64))
 
+(extern CACurrentMediaTime :cc c [] (-> f64))
+(extern CGContextAddArc :cc c [(ptr i8) f64 f64 f64 f64 f64 i64] (-> i64))
+(extern CGContextSetLineJoin :cc c [(ptr i8) i64] (-> i64))
 (extern usleep :cc c [i64] (-> i64))
 (extern strlen :cc c [(ptr i8)] (-> i64))
 (extern objc_getClass :cc c [(ptr i8)] (-> (ptr i8)))

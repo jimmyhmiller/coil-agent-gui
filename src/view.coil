@@ -29,10 +29,10 @@
     (SAsks [] (amber))))
 
 ;; Every state mark in one place, so the graph and the rail can never drift.
-(defn state-mark! [(cv (ptr Canvas)) (s State) (cx f64) (cy f64)] (-> i64)
+(defn state-mark! [(cv (ptr Canvas)) (s State) (cx f64) (cy f64) (now f64)] (-> i64)
   (match s
     (SQueued [] (pending! cv cx cy (ink3)))
-    (SRunning [] (ring! cv cx cy 3.5 (amber)))
+    (SRunning [] (spinner! cv cx cy 3.5 now (amber)))
     (SDone [] (check! cv cx cy (green)))
     (SFailed [] (cross! cv cx cy (red)))
     (SAsks [] (do (text-at! cv (field cv m12) (- cx 3.5) (+ cy 4.0) (amber) "?") 0))))
@@ -70,11 +70,14 @@
                                     (join3 (dec-str (count-in-state app "done")) "/" (dec-str (step-count app))))
                                 (.meta it))
                           st (.state it)]
+                      (when (and (not selected) (= (load i) (.hover-item app)))
+                        (fill! cv 0.0 top RAIL_W ROW (hover-wash))
+                        0)
                       (when selected
                         (fill! cv 0.0 top RAIL_W ROW (amber-wash))
                         (fill! cv 0.0 top 2.0 ROW (amber))
                         0)
-                      (state-mark! cv st (+ GUTTER_RAIL 5.0) (+ top (/ ROW 2.0)))
+                      (state-mark! cv st (+ GUTTER_RAIL 5.0) (+ top (/ ROW 2.0)) (.now app))
                       (text-elided! cv
                                     (field cv f12)
                                     (+ GUTTER_RAIL 20.0)
@@ -96,7 +99,7 @@
                       0))
                 (set! i (+ (load i) 1)))))
     (hline! cv 0.0 (- h 42.0) RAIL_W (line))
-    (text-row! cv (field cv f11) GUTTER_RAIL (- h 42.0) 42.0 (ink3) "cmd N   new")
+    (text-row! cv (field cv f11) GUTTER_RAIL (- h 42.0) 42.0 (ink3) "⌘N   new")
     (vline! cv (- RAIL_W HAIRLINE) 0.0 h (line))
     0))
 
@@ -129,15 +132,26 @@
                   (x0 f64)
                   (y0 f64)
                   (s (ptr Step))
-                  (focused bool)] (-> i64)
-  (let [x (node-x x0 (.col s))
-        y (node-y y0 (.row s))
+                  (focused bool)
+                  (hot bool)
+                  (now f64)] (-> i64)
+  (let [arrive (ease-out (phase now (.born s) ANIM_STEP))
+        settle (phase now (.changed s) ANIM_STEP)
+        x (node-x x0 (.col s))
+        y (- (node-y y0 (.row s)) (* 6.0 (- 1.0 arrive)))
         st (.state s)
         machine (.machine s)
-        border
+        resting
           (if focused
               (amber)
-              (if (= (state-word st) "queued") (line-quiet) (line)))]
+              (if (= (state-word st) "queued") (line-quiet) (line)))
+        ;; A step that just changed state flashes its border toward amber and
+        ;; settles back, so the change is visible without anything moving.
+        ;; ease-out(1) is exactly 1, so a settled node mixes to its resting
+        ;; colour and no branch is needed.
+        border (mix (amber) resting (ease-out settle))]
+    (canvas-alpha! cv arrive)
+    (when hot (fill! cv x y NODE_W NODE_H (hover-wash)) 0)
     (box! cv x y NODE_W NODE_H border)
     (text-elided! cv
                   (field cv f12)
@@ -147,11 +161,12 @@
                   88.0
                   (if (= (state-word st) "queued") (ink3) (if (= (state-word st) "done") (ink2) (ink1)))
                   (.name s))
-    (state-mark! cv st (+ x (- NODE_W 14.0)) (+ y (/ NODE_H 2.0)))
+    (state-mark! cv st (+ x (- NODE_W 14.0)) (+ y (/ NODE_H 2.0)) now)
     (when (> (slice-len [u8] machine) 0)
       (hop! cv (+ x 12.0) (+ y (+ NODE_H 12.0)) (ink3))
       (text-at! cv (field cv f11) (+ x 24.0) (+ y (+ NODE_H 16.0)) (ink3) machine)
       0)
+    (canvas-alpha! cv 1.0)
     0))
 
 (defn max-row [(app (ptr App))] (-> i64)
@@ -210,8 +225,9 @@
                             x0
                             y0
                             (step-at app (load i))
-                            (and (started? app)
-                                 (= (load i) (.focus app))))
+                            (and (started? app) (= (load i) (.focus app)))
+                            (= (load i) (.hover-node app))
+                            (.now app))
                 (set! i (+ (load i) 1)))))
     (hline! cv x (- h 42.0) w (line))
     (let [(mut lx) (+ x GUTTER_PANE)
@@ -267,77 +283,100 @@
 
 ;; ---------------------------------------------------------------- conversation
 
-(defn draw-line! [(cv (ptr Canvas)) (app (ptr App)) (l (ptr Line)) (x f64) (w f64) (top f64)] (-> f64)
-  (let [text (.text l)
+(defn draw-line-reset! [(cv (ptr Canvas)) (v f64)] (-> f64)
+  (canvas-alpha! cv 1.0)
+  v)
+
+(defn draw-line! [(cv (ptr Canvas)) (app (ptr App)) (l (ptr Line)) (x f64) (w f64) (top-in f64)] (-> f64)
+  (let [arrive (ease-out (phase (.now app) (.born l) ANIM_FAST))
+        top (- top-in (* 4.0 (- 1.0 arrive)))
+        text (.text l)
         trail (.trail l)
         body-x (+ x 20.0)
         room (- (- w 40.0) 20.0)]
-    (match (.who l)
-      (You []
-           (do
-             (caret! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) (amber))
-             (text-elided! cv (field cv f13) body-x top LINE_H room (ink1) text)
-             (+ top LINE_H)))
-      (Agent []
-             (do
-               (dot! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) 2.6 (ink1))
-               (text-elided! cv (field cv f13) body-x top LINE_H room (ink2) text)
-               (+ top LINE_H)))
-      (Cont []
-            (do
-              (text-elided! cv (field cv f13) body-x top LINE_H room (ink2) text)
-              (+ top LINE_H)))
-      (Tool []
-            (do
-              (ring! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) 3.0 (ink3))
-              (text-elided! cv (field cv m13) body-x top LINE_H (- room 90.0) (ink1) text)
-              (when (> (slice-len [u8] trail) 0)
-                (text-row! cv
-                           (field cv f11)
-                           (text-right (field cv f11) (- (+ x w) GUTTER_PANE) trail)
-                           top
-                           LINE_H
-                           (green)
-                           trail)
-                0)
-              (+ top LINE_H)))
-      (Result []
-              (do
-                (elbow! cv (+ x 22.0) (+ top (/ LINE_H 2.0)) (ink3))
-                (text-elided! cv (field cv f13) (+ x 34.0) top LINE_H (- room 14.0) (ink3) text)
-                (+ top LINE_H)))
-      (Pending []
-               (do
-                 (fill! cv x top 2.0 (* LINE_H 2.0) (line))
-                 (caret! cv (+ x 14.0) (+ top (/ LINE_H 2.0)) (amber))
-                 (text-elided! cv (field cv f13) (+ x 28.0) top LINE_H (- room 28.0) (ink2) text)
-                 (text-row! cv
-                            (field cv f11)
-                            (+ x 28.0)
-                            (+ top LINE_H)
-                            LINE_H
-                            (ink3)
-                            "queued · delivered at the next turn boundary")
-                 (+ top (* LINE_H 2.0))))
-      (Asks []
-            (do
-              (text-at! cv (field cv m13) (+ x 1.0) (+ top 15.0) (amber) "?")
-              (text-elided! cv (field cv f13) body-x top LINE_H room (amber) text)
-              (+ top LINE_H))))))
+    (canvas-alpha! cv arrive)
+    (draw-line-reset! cv
+                      (match (.who l)
+                        (You []
+                             (do
+                               (caret! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) (amber))
+                               (text-elided! cv (field cv f13) body-x top LINE_H room (ink1) text)
+                               (+ top LINE_H)))
+                        (Agent []
+                               (do
+                                 (dot! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) 2.6 (ink1))
+                                 (text-elided! cv (field cv f13) body-x top LINE_H room (ink2) text)
+                                 (+ top LINE_H)))
+                        (Cont []
+                              (do
+                                (text-elided! cv (field cv f13) body-x top LINE_H room (ink2) text)
+                                (+ top LINE_H)))
+                        (Tool []
+                              (do
+                                (ring! cv (+ x 4.0) (+ top (/ LINE_H 2.0)) 3.0 (ink3))
+                                (text-elided! cv (field cv m13) body-x top LINE_H (- room 90.0) (ink1) text)
+                                (when (> (slice-len [u8] trail) 0)
+                                  (text-row! cv
+                                             (field cv f11)
+                                             (text-right (field cv f11) (- (+ x w) GUTTER_PANE) trail)
+                                             top
+                                             LINE_H
+                                             (green)
+                                             trail)
+                                  0)
+                                (+ top LINE_H)))
+                        (Result []
+                                (do
+                                  (elbow! cv (+ x 22.0) (+ top (/ LINE_H 2.0)) (ink3))
+                                  (text-elided! cv (field cv f13) (+ x 34.0) top LINE_H (- room 14.0) (ink3) text)
+                                  (+ top LINE_H)))
+                        (Pending []
+                                 (do
+                                   (fill! cv x top 2.0 (* LINE_H 2.0) (line))
+                                   (caret! cv (+ x 14.0) (+ top (/ LINE_H 2.0)) (amber))
+                                   (text-elided! cv (field cv f13) (+ x 28.0) top LINE_H (- room 28.0) (ink2) text)
+                                   (text-row! cv
+                                              (field cv f11)
+                                              (+ x 28.0)
+                                              (+ top LINE_H)
+                                              LINE_H
+                                              (ink3)
+                                              "queued · delivered at the next turn boundary")
+                                   (+ top (* LINE_H 2.0))))
+                        (Asks []
+                              (do
+                                (text-at! cv (field cv m13) (+ x 1.0) (+ top 15.0) (amber) "?")
+                                (text-elided! cv (field cv f13) body-x top LINE_H room (amber) text)
+                                (+ top LINE_H)))))))
 
 (defn draw-composer! [(cv (ptr Canvas))
                       (app (ptr App))
                       (x f64)
                       (w f64)
                       (h f64)
-                      (hint (slice u8))] (-> i64)
+                      (hint (slice u8))
+                      (placeholder (slice u8))] (-> i64)
   (let [top (- h 52.0)
         text (al-slice [u8] (.input app))
-        base (+ x GUTTER_PANE)]
+        base (+ x GUTTER_PANE)
+        empty (= (slice-len [u8] text) 0)
+        ;; Solid while you are typing, blinking once you stop: a caret that
+        ;; blinks under your fingers is the thing every editor gets wrong.
+        since (- (.now app) (.typed app))
+        cycles (/ (.now app) BLINK)
+        on (or (< since 0.7) (< (- cycles (cast f64 (cast i64 cycles))) 0.55))]
     (hline! cv x top w (line))
     (caret! cv (+ base 4.0) (+ top 26.0) (amber))
-    (let [tw (text-elided! cv (field cv f13) (+ base 18.0) top 52.0 (- w 200.0) (ink1) text)]
-      (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber)))
+    (let [tw
+            (if empty
+                ;; The placeholder begins past the cursor rather than under it.
+                (do
+                  (text-elided! cv (field cv f13) (+ base 36.0) top 52.0 (- w 220.0) (line) placeholder)
+                  0.0)
+                (text-elided! cv (field cv f13) (+ base 18.0) top 52.0 (- w 200.0) (ink1) text))]
+      (when on
+        (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber))
+        0))
     (when (> (slice-len [u8] hint) 0)
       (text-row! cv
                  (field cv f11)
@@ -381,15 +420,21 @@
                           (not (started? app)) "keep talking to change the plan"
                           (> (count-in-state app "running") 0) "the workflow keeps running"
                           (= (count-in-state app "done") (step-count app)) "a change starts the next run"
-                          :else "keep talking"))
+                          :else "keep talking")
+                    ;; The placeholder names the thing your typing reaches, so
+                    ;; the composer never sits there unlabelled.
+                    (if (started? app)
+                        (join2 "message " (.name (step-at app (.focus app))))
+                        "message the plan"))
     0))
 
 ;; ---------------------------------------------------------------- header
 
-(defn run-button! [(cv (ptr Canvas)) (right f64) (top f64) (label (slice u8))] (-> f64)
+(defn run-button! [(cv (ptr Canvas)) (right f64) (top f64) (label (slice u8)) (hot bool)] (-> f64)
   (let [w (+ (text-width (field cv f11) label) 24.0)
         x (- right w)
         y (+ top 13.0)]
+    (when hot (fill! cv x y w 22.0 (amber-wash)) 0)
     (box! cv x y w 22.0 (amber))
     (text-row! cv (field cv f11) (+ x 12.0) y 22.0 (amber) label)
     x))
@@ -406,17 +451,17 @@
     (text-row! cv (field cv m13) GUTTER_RAIL 0.0 HEADER (ink1) "coil")
     (text-row! cv
                (field cv f11)
-               (text-right (field cv f11) (- RAIL_W GUTTER_RAIL) "cmd K")
+               (text-right (field cv f11) (- RAIL_W GUTTER_RAIL) "⌘K")
                0.0
                HEADER
                (ink3)
-               "cmd K")
+               "⌘K")
     (if (not split)
         (do (text-row! cv (field cv f13) (+ RAIL_W GUTTER_PANE) 0.0 HEADER (ink3) title) 0)
         (let [mid-right (+ RAIL_W graph-w)]
           (text-elided! cv (field cv m13) (+ RAIL_W GUTTER_PANE) 0.0 HEADER 320.0 (ink1) title)
           (if (and (> n 0) (not started))
-              (do (run-button! cv (- mid-right GUTTER_PANE) 0.0 (join3 "Run " (dec-str n) " steps")) 0)
+              (do (run-button! cv (- mid-right GUTTER_PANE) 0.0 (join3 "Run " (dec-str n) " steps") (.hover-run app)) 0)
               (do
                 (text-row! cv
                            (field cv f11)
@@ -507,7 +552,7 @@
         (fill! cv (+ (+ left 22.0) tw) (+ top 55.0) 8.0 16.0 (amber))
         0))
     (hline! cv left (+ top 82.0) box-w (line))
-    (text-row! cv (field cv f11) left (+ top 92.0) 22.0 (ink3) "return send · shift-return newline")
+    (text-row! cv (field cv f11) left (+ top 92.0) 22.0 (ink3) "⏎ send · ⇧⏎ newline")
     0))
 
 ;; ---------------------------------------------------------------- whole window

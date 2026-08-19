@@ -4,5 +4,5 @@ entry = "src/main.coil"
 source-roots = ["src"]
 
 [link]
-frameworks = ["AppKit", "CoreGraphics", "CoreText", "ImageIO", "CoreFoundation"]
+frameworks = ["AppKit", "CoreGraphics", "CoreText", "ImageIO", "CoreFoundation", "QuartzCore"]
 libs = ["objc"]

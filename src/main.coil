@@ -8,6 +8,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.args" :as args)
+(import "coil.os" :as os)
 (import "coil.arraylist" :use *)
 (import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
@@ -220,7 +221,27 @@
             (if (>= hit 0) (do (store! (field app focus) hit) 0) 0))
         :else 0))
 
+;; What is under the pointer, and what the pointer should look like there.
+(defn hover! [(app (ptr App)) (cv (ptr Canvas)) (px f64) (py f64) (h f64)] (-> i64)
+  (let [in-rail (< px RAIL_W)
+        in-graph (and (>= px RAIL_W) (< px (+ RAIL_W GRAPH_W)))
+        item (if (and in-rail (>= py HEADER)) (rail-hit app py) -1)
+        node (if in-graph (node-hit app px py h) -1)
+        run (run-hit cv app px py)
+        composer (and (> px (+ RAIL_W GRAPH_W)) (> py (- h 52.0)))]
+    (set! (field app hover-item) item)
+    (set! (field app hover-node) node)
+    (set! (field app hover-run) run)
+    (let [name
+            (cond (or (or (>= item 0) (>= node 0)) run) c"pointingHandCursor"
+                  composer c"IBeamCursor"
+                  :else c"arrowCursor")
+          cursor (msg (ptr i8) (objc-class c"NSCursor") (objc-sel name) [])]
+      (msg (ptr i8) cursor (objc-sel c"set") []))
+    0))
+
 (defn key! [(app (ptr App)) (ev (ptr i8)) (command bool)] (-> i64)
+  (set! (field app typed) (.now app))
   (let [chars (msg (ptr i8) ev (objc-sel c"characters") [])]
     (if (null? chars)
         0
@@ -228,7 +249,8 @@
               n (strlen utf)
               first (primitive/cast i64 (load (primitive/cast (ptr u8) utf)))]
           (if command
-              (cond (= first 110) (new-workflow! app)
+              (cond (= first 113) (do (os/_exit 0) 0)
+                    (= first 110) (new-workflow! app)
                     (or (= first 13) (= first 10))
                       (if (and (> (step-count app) 0) (not (started? app)))
                           (do (run-start! app) (rail-sync! app) 0)
@@ -323,6 +345,7 @@
         (do (println "fonts failed to load — run from the project root") 1)
         (do
           (msg (ptr i8) nsapp (objc-sel c"setActivationPolicy:") [i64] 0)
+          (msg (ptr i8) win (objc-sel c"setAcceptsMouseMovedEvents:") [i64] 1)
           (msg (ptr i8) win (objc-sel c"setTitle:") [(ptr i8)] title)
           (msg (ptr i8) (msg (ptr i8) win (objc-sel c"contentView") []) (objc-sel c"setWantsLayer:") [i64] 1)
           (msg (ptr i8) win (objc-sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil-ptr))

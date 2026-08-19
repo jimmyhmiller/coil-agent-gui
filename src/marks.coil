@@ -87,3 +87,19 @@
 ;; A small dot for queued: present, not yet anything.
 (defn pending! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
   (dot! cv cx cy 1.5 c))
+
+;; The one moving thing in the interface: an arc that turns while a step runs.
+;; A rotation rather than a pulse, because a pulse competes with the text for
+;; attention while a rotation reads as "still going" from the corner of the eye.
+(defn spinner! [(cv (ptr Canvas)) (cx f64) (cy f64) (r f64) (now f64) (c Color)] (-> i64)
+  (let [ctx (.ctx cv)
+        spins (/ now 1.6)
+        turn (* (- spins (cast f64 (cast i64 spins))) 6.2831853)
+        sweep 4.4]
+    (set-stroke! cv c)
+    (CGContextSetLineWidth ctx 1.5)
+    (CGContextSetLineCap ctx 1)
+    (CGContextSetLineDash ctx 0.0 (cast (ptr f64) 0) 0)
+    (CGContextBeginPath ctx)
+    (CGContextAddArc ctx cx (flip-y cv cy 0.0) r (- 0.0 turn) (- 0.0 (+ turn sweep)) 1)
+    (CGContextStrokePath ctx)))

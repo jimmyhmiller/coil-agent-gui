@@ -23,11 +23,13 @@
    (from i64)
    (join i64)
    (col i64)
-   (row i64)])
+   (row i64)
+   (born f64)
+   (changed f64)])
 
 (defsum Speaker (You []) (Agent []) (Cont []) (Tool []) (Result []) (Pending []) (Asks []))
 
-(defstruct Line [(who Speaker) (text (slice u8)) (trail (slice u8))])
+(defstruct Line [(who Speaker) (text (slice u8)) (trail (slice u8)) (born f64)])
 
 (defstruct Item
   [(project (slice u8))
@@ -49,7 +51,13 @@
    (selected i64)
    (focus i64)
    (tick i64)
-   (running bool)])
+   (running bool)
+   (now f64)
+   (typed f64)
+   (split-at f64)
+   (hover-item i64)
+   (hover-node i64)
+   (hover-run bool)])
 
 (defn state-word [(s State)] (-> (slice u8))
   (match s
@@ -127,6 +135,14 @@
                 (set! i (+ (load i) 1)))))
     0))
 
+;; When the window goes from one prompt to three panes, that transition has a
+;; start time too.
+(defn note-split! [(app (ptr App))] (-> i64)
+  (when (<= (.split-at app) 0.0)
+    (set! (field app split-at) (.now app))
+    0)
+  0)
+
 (defn steps-clear! [(app (ptr App))] (-> i64)
   (set! (.steps app) (al-new [Step] (.alc app)))
   0)
@@ -135,14 +151,31 @@
   (set! (.lines app) (al-new [Line] (.alc app)))
   0)
 
+;; Everything that enters the interface is stamped with when it arrived, which
+;; is the whole animation model: the view eases on the age of a thing rather
+;; than on a running tween somebody has to remember to advance.
 (defn push-step! [(app (ptr App)) (s Step)] (-> i64)
   (al-push! [Step] (field app steps) s)
+  (let [at (- (al-len [Step] (.steps app)) 1)
+        p (al-elem [Step] (field app steps) at)]
+    (set! (field p born) (.now app))
+    (set! (field p changed) (.now app)))
   (relayout! app)
   0)
 
 (defn push-line! [(app (ptr App)) (l Line)] (-> i64)
   (al-push! [Line] (field app lines) l)
+  (let [at (- (al-len [Line] (.lines app)) 1)
+        p (al-elem [Line] (field app lines) at)]
+    (set! (field p born) (.now app)))
   0)
+
+;; A state change is a visible event, so it gets its own timestamp.
+(defn set-step-state! [(app (ptr App)) (at i64) (st State)] (-> i64)
+  (let [s (step-at app at)]
+    (set! (field s state) st)
+    (set! (field s changed) (.now app))
+    0))
 
 (defn step-count [(app (ptr App))] (-> i64)
   (al-len [Step] (.steps app)))
@@ -215,6 +248,12 @@
   (set! (.focus app) 0)
   (set! (.tick app) 0)
   (set! (.running app) false)
+  (set! (.now app) 0.0)
+  (set! (.typed app) 0.0)
+  (set! (.split-at app) 0.0)
+  (set! (.hover-item app) -1)
+  (set! (.hover-node app) -1)
+  (set! (.hover-run app) false)
   (steps-clear! app)
   (lines-clear! app)
   (rail-fixture! app)
@@ -370,6 +409,7 @@
     (if (= (step-count app) 0)
         (let [subject (own-str a (short-name text))]
           (steps-clear! app)
+          (note-split! app)
           (push-step! app (mk-step "read" -1 -1 (SQueued) "" 0))
           (push-step! app (mk-step subject 0 -1 (SQueued) "" 0))
           (push-step! app (mk-step "test" 1 -1 (SQueued) "" 0))
