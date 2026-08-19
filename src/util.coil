@@ -3,6 +3,9 @@
 ;; A ring of static buffers rather than an allocator: every result is consumed by
 ;; the draw call on the next line, and a frame never holds more than a handful at
 ;; once. The ring size is the only thing keeping that true, so it is generous.
+;;
+;; ⚠ These slices are valid until the ring wraps. Draw with them; never store
+;; one in a struct that outlives the frame — copy it into an allocator first.
 (module coilgui.util)
 
 (import "coil.alloc" :as alloc :use *)

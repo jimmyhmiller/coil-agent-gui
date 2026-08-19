@@ -1,0 +1,405 @@
+;; The real backing: the agent harness on disk.
+;;
+;; A factory is a workflow. `factories/<folder>/factory.json` names it and lists
+;; its workers, which are its steps. `.factory-runs/<name>/<timestamp>.jsonl` is
+;; the durable event journal a run wrote — the same versioned records the
+;; harness's own TUI replays — so run state and every conversation in this
+;; window are read from what actually happened rather than modelled here.
+;;
+;; Nothing in this file writes. Starting a run is a separate, explicit act.
+(module coilgui.harness)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.json" :as json)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coilgui.dir" :as dir)
+(import "coilgui.model" :use *)
+(import "coilgui.util" :use *)
+(import "coil.os" :as os)
+
+(defstruct Workflow
+  [(project (slice u8))
+   (name (slice u8))
+   (folder (slice u8))
+   (goal (slice u8))
+   (workers (ArrayList (slice u8)))
+   (journal (slice u8))
+   (done i64)])
+
+(defn join [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
+  (match (str-concat a x y)
+    (Some [s] s)
+    (None [] x)))
+
+(defn path3 [(a (ptr Allocator)) (x (slice u8)) (y (slice u8)) (z (slice u8))] (-> (slice u8))
+  (join a (join a x y) z))
+
+;; "02-engine-and-tests.md" reads as a filename; "engine and tests" reads as a
+;; step. The leading number is ordering metadata, not part of the name.
+(defn worker-label [(a (ptr Allocator)) (file (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] file)
+        (mut start) 0
+        (mut end) n]
+    (loop (if (or (>= (load start) n)
+                  (not (or (and (>= (primitive/cast i64 (slice-get [u8] file (load start))) 48)
+                                (<= (primitive/cast i64 (slice-get [u8] file (load start))) 57))
+                           (= (primitive/cast i64 (slice-get [u8] file (load start))) 45))))
+              (break)
+              (set! start (+ (load start) 1))))
+    (when (and (> n 3) (= (substr file (- n 3) n) ".md"))
+      (set! end (- n 3))
+      0)
+    (let [core (substr file (load start) (load end))
+          (mut out) (sb-new a)
+          (mut i) 0]
+      (loop (if (>= (load i) (slice-len [u8] core))
+                (break)
+                (do
+                  (sb-push-byte! (mut out)
+                                 (if (= (primitive/cast i64 (slice-get [u8] core (load i))) 45)
+                                     (primitive/cast u8 32)
+                                     (slice-get [u8] core (load i))))
+                  (set! i (+ (load i) 1)))))
+      (sb-finish! (mut out)))))
+
+;; JSON string spans come back in their encoded form, so a journal's text still
+;; carries \n, \t and \uXXXX. Decoding is this module's job: nothing above it
+;; should ever have to know the transcript was ever JSON.
+(defn unescape [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)
+        (mut out) (sb-new a)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [c (primitive/cast i64 (slice-get [u8] s (load i)))]
+                (if (or (!= c 92) (>= (+ (load i) 1) n))
+                    (do
+                      (sb-push-byte! (mut out) (primitive/cast u8 c))
+                      (set! i (+ (load i) 1)))
+                    (let [e (primitive/cast i64 (slice-get [u8] s (+ (load i) 1)))]
+                      (cond (= e 110) (do (sb-push-byte! (mut out) (primitive/cast u8 10)) (set! i (+ (load i) 2)))
+                            (= e 116) (do (sb-push-byte! (mut out) (primitive/cast u8 9)) (set! i (+ (load i) 2)))
+                            (= e 114) (do (sb-push-byte! (mut out) (primitive/cast u8 13)) (set! i (+ (load i) 2)))
+                            (= e 98) (set! i (+ (load i) 2))
+                            (= e 102) (set! i (+ (load i) 2))
+                            (= e 117)
+                            ;; A \uXXXX escape becomes a space: this pane shows
+                            ;; a summary line, and a half-decoded surrogate is
+                            ;; worse than a gap.
+                            (do
+                              (sb-push-byte! (mut out) (primitive/cast u8 32))
+                              (set! i (+ (load i) 6)))
+                              :else
+                            (do
+                              (sb-push-byte! (mut out) (primitive/cast u8 e))
+                              (set! i (+ (load i) 2))))))
+                0)))
+    (sb-finish! (mut out))))
+
+;; The first line of a multi-line result, which is the part worth showing.
+(defn first-line [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (= (primitive/cast i64 (slice-get [u8] s (load i))) 10))
+              (break)
+              (set! i (+ (load i) 1))))
+    (substr s 0 (load i))))
+
+(defn doc-string [(d json/Doc) (obj i64) (key (slice u8))] (-> (slice u8))
+  (let [at (json/object-get d obj key)]
+    (if (< at 0) "" (json/string-text d (json/token d at)))))
+
+;; The newest journal in `.factory-runs/<name>`. Names are millisecond stamps of
+;; equal width, so the greatest name is the newest run.
+(defn newest-journal [(a (ptr Allocator)) (root (slice u8)) (name (slice u8))] (-> (slice u8))
+  (let [dirpath (path3 a root "/.factory-runs/" name)
+        files (dir/entries-with-suffix a dirpath ".jsonl")
+        n (al-len [(slice u8)] files)
+        (mut best) ""
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [f (al-get [(slice u8)] files (load i))]
+                (when (> (str-cmp f (load best)) 0) (set! best f) 0)
+                (set! i (+ (load i) 1)))))
+    (if (= (slice-len [u8] (load best)) 0)
+        ""
+        (join a (join a dirpath "/") (load best)))))
+
+(defn count-occurrences [(hay (slice u8)) (needle (slice u8))] (-> i64)
+  (let [(mut at) 0
+        (mut found) 0]
+    (loop (match (str-find-from hay needle (load at))
+            (Some [i]
+                  (do
+                    (set! found (+ (load found) 1))
+                    (set! at (+ i 1))
+                    0))
+            (None [] (break))))
+    (load found)))
+
+;; How many workers finished in that journal. A byte scan rather than a parse:
+;; this runs for every workflow at startup and only needs a count.
+(defn journal-done-count [(a (ptr Allocator)) (path (slice u8))] (-> i64)
+  (if (= (slice-len [u8] path) 0)
+      0
+      (match (fs/read-file a path)
+        ;; The factory records one accepted stage per finished worker. Counting
+        ;; run.completed instead would also count the factory's own run and any
+        ;; retried attempt, which is how a workflow ends up claiming 2/1.
+        (Ok [text] (count-occurrences text "\"event\":\"factory.stage.accepted\""))
+        (Err [e] 0))))
+
+(defn read-factory [(a (ptr Allocator))
+                    (root (slice u8))
+                    (project (slice u8))
+                    (folder (slice u8))] (-> (Option Workflow))
+  (let [manifest (path3 a (path3 a root "/factories/" folder) "/" "factory.json")]
+    (if (not (dir/exists? a manifest))
+        (None)
+        (match (fs/read-file a manifest)
+          (Err [e] (None))
+          (Ok [text]
+              (match (json/parse a text)
+                (Err [e] (None))
+                (Ok [d]
+                    (let [w (alloc/stack Workflow)
+                          name (doc-string d 0 "name")
+                          workers-at (json/object-get d 0 "workers")
+                          (mut steps) (al-new [(slice u8)] a)]
+                      (when (>= workers-at 0)
+                        (let [count (json/child-count (json/token d workers-at))
+                              (mut i) 0]
+                          (loop (if (>= (load i) count)
+                                    (break)
+                                    (let [at (json/array-nth d workers-at (load i))]
+                                      (when (>= at 0)
+                                        (al-push! [(slice u8)]
+                                                  (mut steps)
+                                                  (worker-label a (json/string-text d (json/token d at))))
+                                        0)
+                                      (set! i (+ (load i) 1)))))
+                          0))
+                      (set! (.project w) project)
+                      (set! (.name w) (if (= (slice-len [u8] name) 0) folder name))
+                      (set! (.folder w) (path3 a root "/factories/" folder))
+                      (set! (.goal w) (doc-string d 0 "goal"))
+                      (set! (.workers w) (load steps))
+                      (set! (.journal w) (newest-journal a root (.name w)))
+                      (set! (.done w) (journal-done-count a (.journal w)))
+                      (Some (load w))))))))))
+
+;; Every factory under `<root>/factories`, in directory order.
+(defn discover [(a (ptr Allocator)) (root (slice u8)) (project (slice u8))] (-> (ArrayList Workflow))
+  (let [(mut out) (al-new [Workflow] a)
+        names (dir/entries a (join a root "/factories"))
+        n (al-len [(slice u8)] names)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (match (read-factory a root project (al-get [(slice u8)] names (load i)))
+                  (Some [w] (al-push! [Workflow] (mut out) w))
+                  (None [] 0))
+                (set! i (+ (load i) 1)))))
+    (load out)))
+
+;; ---------------------------------------------------------------- replay
+
+;; Worker N's run id. The harness names a factory's worker runs
+;; `<factory>-worker-<n>`, one-based, and that is the only link between a step
+;; in the manifest and its events in the journal.
+(defn worker-run-id [(a (ptr Allocator)) (factory (slice u8)) (n i64)] (-> (slice u8))
+  (let [(mut out) (sb-new a)]
+    (sb-push-str! (mut out) factory)
+    (sb-push-str! (mut out) "-worker-")
+    (sb-push-str! (mut out) (dec-str n))
+    (sb-finish! (mut out))))
+
+(defn line-at [(text (slice u8)) (from i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) from]
+    (loop (if (or (>= (load i) n) (= (primitive/cast i64 (slice-get [u8] text (load i))) 10))
+              (break)
+              (set! i (+ (load i) 1))))
+    (load i)))
+
+;; Fill the app's steps from the manifest, then walk the journal once to give
+;; each step the state its run actually reached.
+(defn load-into! [(app (ptr App)) (wf (ptr Workflow))] (-> i64)
+  (let [a (.alc app)
+        count (al-len [(slice u8)] (.workers wf))
+        (mut i) 0]
+    (steps-clear! app)
+    (lines-clear! app)
+    (set! (.title app) (.name wf))
+    (set! (.factory app) (.name wf))
+    (loop (if (>= (load i) count)
+              (break)
+              (do
+                (push-step! app
+                            (mk-step (al-get [(slice u8)] (.workers wf) (load i))
+                                     (- (load i) 1)
+                                     -1
+                                     (SQueued)
+                                     ""
+                                     0))
+                (set! i (+ (load i) 1)))))
+    (set! (.journal app) "")
+    (when (> (slice-len [u8] (.journal wf)) 0)
+      (match (fs/read-file a (.journal wf))
+        (Ok [text]
+            (do
+              (set! (.journal app) text)
+              (let [n (slice-len [u8] text)
+                    (mut at) 0]
+                (loop (if (>= (load at) n)
+                          (break)
+                          (let [stop (line-at text (load at))
+                                row (substr text (load at) stop)]
+                            (when (> (slice-len [u8] row) 2)
+                              (match (json/parse a row)
+                                (Ok [d]
+                                    (let [event (doc-string d 0 "event")
+                                          run (doc-string d 0 "run_id")
+                                          (mut k) 0]
+                                      ;; Which step is this? The run id carries it.
+                                      (loop (if (>= (load k) count)
+                                                (break)
+                                                (do
+                                                  (when (= run (worker-run-id a (.name wf) (+ (load k) 1)))
+                                                    (cond (= event "run.started")
+                                                            (set! (.state (step-at app (load k))) (SRunning))
+                                                          (= event "run.completed")
+                                                            (set! (.state (step-at app (load k))) (SDone))
+                                                          (= event "run.failed")
+                                                            (set! (.state (step-at app (load k))) (SFailed))
+                                                          :else 0)
+                                                    0)
+                                                  (set! k (+ (load k) 1)))))
+                                      0))
+                                (Err [e] 0))
+                              0)
+                            (set! at (+ stop 1)))))
+                0)))
+        (Err [e] 0))
+      0)
+    (relayout! app)
+    0))
+
+;; The conversation for one step, replayed out of the journal: assistant text
+;; from the response deltas, one line per tool call and its result. Rebuilt
+;; whenever the focused step changes, which is why the journal text is kept.
+(defn rebuild-lines! [(app (ptr App))] (-> i64)
+  (let [a (.alc app)
+        text (.journal app)
+        want (worker-run-id a (.factory app) (+ (.focus app) 1))
+        n (slice-len [u8] text)
+        (mut at) 0
+        (mut speech) (sb-new a)
+        (mut speaking) false]
+    (lines-clear! app)
+    (if (or (= n 0) (= (slice-len [u8] (.factory app)) 0))
+        0
+        (do
+          (loop (if (>= (load at) n)
+                    (break)
+                    (let [stop (line-at text (load at))
+                          row (substr text (load at) stop)]
+                      (when (> (slice-len [u8] row) 2)
+                        (match (json/parse a row)
+                          (Ok [d]
+                              (let [event (doc-string d 0 "event")
+                                    run (doc-string d 0 "run_id")
+                                    payload (json/object-get d 0 "payload")]
+                                (when (= run want)
+                                  (cond (= event "model.response.delta")
+                                          (do
+                                            (when (>= payload 0)
+                                              (sb-push-str! (mut speech)
+                                                            (unescape a (json/string-text d (json/token d payload))))
+                                              (set! speaking true)
+                                              0)
+                                            0)
+                                        (= event "tool.call.proposed")
+                                          (do
+                                            (when (load speaking)
+                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+                                              (set! speech (sb-new a))
+                                              (set! speaking false)
+                                              0)
+                                            (when (>= payload 0)
+                                              (push-line! app
+                                                          (mk-line (Tool)
+                                                                   (doc-string d payload "name")
+                                                                   ""))
+                                              0)
+                                            0)
+                                        (= event "tool.call.completed")
+                                          (do
+                                            (when (>= payload 0)
+                                              (let [out (first-line (unescape a (doc-string d payload "stdout")))
+                                                    head
+                                                      (substr out
+                                                              0
+                                                              (if (> (slice-len [u8] out) 58) 58 (slice-len [u8] out)))]
+                                                (push-line! app
+                                                            (mk-line (Result)
+                                                                     (if (= (slice-len [u8] head) 0) "done" head)
+                                                                     "")))
+                                              0)
+                                            0)
+                                        (= event "tool.call.failed")
+                                          (do (push-line! app (mk-line (Result) "failed" "")) 0)
+                                        :else 0)
+                                  0)
+                                0))
+                          (Err [e] 0))
+                        0)
+                      (set! at (+ stop 1)))))
+          (when (load speaking)
+            (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+            0)
+          0))))
+
+;; ---------------------------------------------------------------- starting
+
+;; Start a factory run. This is the one thing in this module that is not a read,
+;; so it is deliberately explicit: it shells out to the harness binary exactly as
+;; a person would, in the harness's own directory, and then leaves. The run's
+;; progress comes back the same way every other run's does — through the journal
+;; it writes.
+(defn start-run! [(a (ptr Allocator)) (root (slice u8)) (folder (slice u8))] (-> i64)
+  (let [(mut cmd) (sb-new a)]
+    (sb-push-str! (mut cmd) "cd ")
+    (sb-push-str! (mut cmd) root)
+    (sb-push-str! (mut cmd) " && ./harness factory run ")
+    (sb-push-str! (mut cmd) folder)
+    (spawn-shell a (sb-finish! (mut cmd)))))
+
+;; /bin/sh -c <line>, detached. Returns the child pid, or a negative value.
+(defn spawn-shell [(a (ptr Allocator)) (line (slice u8))] (-> i64)
+  (let [argv (alloc/stack (array (ptr i8) 4))]
+    (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 0) c"/bin/sh")
+    (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 1) c"-c")
+    (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 2) (str->cstr a line))
+    (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 3) (primitive/cast (ptr i8) 0))
+    (os/spawn c"/bin/sh" (primitive/cast (ptr (ptr i8)) argv) (os/spawn-envp))))
+
+;; Has this workflow's newest journal changed since it was loaded? A running
+;; factory writes a new file, so a different path means new work to show.
+(defn journal-changed? [(a (ptr Allocator))
+                        (root (slice u8))
+                        (wf (ptr Workflow))] (-> bool)
+  (let [now (newest-journal a root (.name wf))]
+    (!= now (.journal wf))))
+
+(defn refresh! [(a (ptr Allocator)) (root (slice u8)) (wf (ptr Workflow))] (-> i64)
+  (set! (.journal wf) (newest-journal a root (.name wf)))
+  (set! (.done wf) (journal-done-count a (.journal wf)))
+  0)

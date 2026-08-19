@@ -63,8 +63,10 @@
                       0)
                     (let [top (load y)
                           name (.name it)
+                          ;; The open workflow reports live counts; every other
+                          ;; row reports what its last run left behind.
                           meta
-                            (if (= (load i) 1)
+                            (if (and (>= (.source it) 0) (= (.source it) (.open app)))
                                 (if (= (step-count app) 0)
                                     ""
                                     (join3 (dec-str (count-in-state app "done")) "/" (dec-str (step-count app))))
@@ -359,24 +361,20 @@
   (let [top (- h 52.0)
         text (al-slice [u8] (.input app))
         base (+ x GUTTER_PANE)
-        empty (= (slice-len [u8] text) 0)
-        ;; Solid while you are typing, blinking once you stop: a caret that
-        ;; blinks under your fingers is the thing every editor gets wrong.
-        since (- (.now app) (.typed app))
-        cycles (/ (.now app) BLINK)
-        on (or (< since 0.7) (< (- cycles (cast f64 (cast i64 cycles))) 0.55))]
+        empty (= (slice-len [u8] text) 0)]
     (hline! cv x top w (line))
     (caret! cv (+ base 4.0) (+ top 26.0) (amber))
     (let [tw
             (if empty
-                ;; The placeholder begins past the cursor rather than under it.
+                ;; The placeholder starts past the cursor rather than under it.
                 (do
                   (text-elided! cv (field cv f13) (+ base 36.0) top 52.0 (- w 220.0) (line) placeholder)
                   0.0)
                 (text-elided! cv (field cv f13) (+ base 18.0) top 52.0 (- w 200.0) (ink1) text))]
-      (when on
-        (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber))
-        0))
+      ;; The cursor does not blink. It is a position, not an alarm: a blinking
+      ;; block is movement the user did not cause, in the one place they are
+      ;; already looking.
+      (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber)))
     (when (> (slice-len [u8] hint) 0)
       (text-row! cv
                  (field cv f11)
@@ -388,28 +386,47 @@
       0)
     0))
 
+(defn line-height [(l (ptr Line))] (-> f64)
+  (match (.who l)
+    (Pending [] (* LINE_H 2.0))
+    (_ LINE_H)))
+
+;; The conversation is anchored to the bottom, like a terminal: a replayed run
+;; is hundreds of lines and the part worth reading is the end of it. When it
+;; fits, it sits at the top as normal.
 (defn draw-convo! [(cv (ptr Canvas)) (app (ptr App)) (x f64) (w f64) (h f64)] (-> i64)
   (let [n (al-len [Line] (.lines app))
-        (mut y) (+ HEADER 22.0)
+        top (+ HEADER 22.0)
+        bottom (- h 66.0)
+        (mut total) 0.0
         (mut i) 0]
-    (clip-push! cv x HEADER w (- (- h HEADER) 52.0))
     (loop (if (>= (load i) n)
               (break)
               (let [l (al-elem [Line] (field app lines) (load i))
-                    next (draw-line! cv app l (+ x GUTTER_PANE) (- w GUTTER_PANE) (load y))
                     follows
                       (if (>= (+ (load i) 1) n)
                           false
-                          (match (.who (al-elem [Line]
-                                                (field app lines)
-                                                (+ (load i) 1)))
+                          (match (.who (al-elem [Line] (field app lines) (+ (load i) 1)))
                             (Cont [] true)
                             (_ false)))]
-                (set! y (if follows next (+ next 8.0)))
+                (set! total (+ (load total) (+ (line-height l) (if follows 0.0 8.0))))
                 (set! i (+ (load i) 1)))))
-    (clip-pop! cv)
-    ;; The hint states what typing will do right now, and is derived from the model
-    ;; rather than from which screen someone thinks they are on.
+    (let [(mut y) (if (< (load total) (- bottom top)) top (- bottom (load total)))]
+      (clip-push! cv x HEADER w (- (- h HEADER) 52.0))
+      (set! i 0)
+      (loop (if (>= (load i) n)
+                (break)
+                (let [l (al-elem [Line] (field app lines) (load i))
+                      next (draw-line! cv app l (+ x GUTTER_PANE) (- w GUTTER_PANE) (load y))
+                      follows
+                        (if (>= (+ (load i) 1) n)
+                            false
+                            (match (.who (al-elem [Line] (field app lines) (+ (load i) 1)))
+                              (Cont [] true)
+                              (_ false)))]
+                  (set! y (if follows next (+ next 8.0)))
+                  (set! i (+ (load i) 1)))))
+      (clip-pop! cv))
     (draw-composer! cv
                     app
                     x
@@ -421,14 +438,10 @@
                           (> (count-in-state app "running") 0) "the workflow keeps running"
                           (= (count-in-state app "done") (step-count app)) "a change starts the next run"
                           :else "keep talking")
-                    ;; The placeholder names the thing your typing reaches, so
-                    ;; the composer never sits there unlabelled.
                     (if (started? app)
                         (join2 "message " (.name (step-at app (.focus app))))
                         "message the plan"))
     0))
-
-;; ---------------------------------------------------------------- header
 
 (defn run-button! [(cv (ptr Canvas)) (right f64) (top f64) (label (slice u8)) (hot bool)] (-> f64)
   (let [w (+ (text-width (field cv f11) label) 24.0)

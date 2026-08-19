@@ -20,6 +20,7 @@
 (import "coilgui.model" :use *)
 (import "coilgui.util" :use *)
 (import "coilgui.view" :use *)
+(import "coilgui.harness" :as harness)
 
 (const WIDTH 1440)
 (const HEIGHT 900)
@@ -190,6 +191,60 @@
           (rail-sync! app)
           0))))
 
+;; Where the harness lives. One environment variable so this is not wired to my
+;; machine, and a sibling checkout by default.
+(defn harness-root [(a (ptr Allocator))] (-> (slice u8))
+  (match (os/env-get a "COIL_HARNESS_ROOT")
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] "../coil-agent-harness")))
+    (Err [e] "../coil-agent-harness")))
+
+;; The rail, from the factories actually on disk: one heading per project, one
+;; row per workflow, each row remembering which workflow it came from.
+(defn rail-build! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow)))] (-> i64)
+  (let [a (.alc app)
+        n (al-len [harness/Workflow] (load flows))
+        (mut project) ""
+        (mut i) 0]
+    (set! (.items app) (al-new [Item] a))
+    (loop (if (>= (load i) n)
+              (break)
+              (let [w (al-elem [harness/Workflow] flows (load i))
+                    steps (al-len [(slice u8)] (.workers w))
+                    done (.done w)]
+                (when (!= (.project w) (load project))
+                  (set! project (.project w))
+                  (al-push! [Item] (field app items) (mk-item (.project w) "" (SQueued) "" true -1))
+                  0)
+                (al-push! [Item]
+                          (field app items)
+                          (mk-item (.project w)
+                                   (.name w)
+                                   (cond (= steps 0) (SQueued)
+                                         (>= done steps) (SDone)
+                                         (> done 0) (SRunning)
+                                         :else (SQueued))
+                                   ;; Copied out of the formatting ring: this
+                                   ;; string outlives the frame that built it.
+                                   (if (= steps 0)
+                                       ""
+                                       (own-str a (join3 (dec-str done) "/" (dec-str steps))))
+                                   false
+                                   (load i)))
+                (set! i (+ (load i) 1)))))
+    0))
+
+(defn open-workflow! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow))) (at i64)] (-> i64)
+  (when (and (>= at 0) (< at (al-len [harness/Workflow] (load flows))))
+    (harness/load-into! app (al-elem [harness/Workflow] flows at))
+    (set! (.open app) at)
+    (set! (.focus app) 0)
+    (harness/rebuild-lines! app)
+    0)
+  0)
+
 (defn focus-next! [(app (ptr App))] (-> i64)
   (let [n (step-count app)]
     (when (> n 0)
@@ -208,7 +263,12 @@
   (rail-sync! app)
   0)
 
-(defn click! [(app (ptr App)) (cv (ptr Canvas)) (px f64) (py f64) (h f64)] (-> i64)
+(defn click! [(app (ptr App))
+              (cv (ptr Canvas))
+              (flows (ptr (ArrayList harness/Workflow)))
+              (px f64)
+              (py f64)
+              (h f64)] (-> i64)
   (cond (< py HEADER)
           (if (run-hit cv app px py)
               (do (run-start! app) (rail-sync! app) 0)
@@ -299,6 +359,7 @@
 (defn pump! [(nsapp (ptr i8))
              (app (ptr App))
              (cv (ptr Canvas))
+             (flows (ptr (ArrayList harness/Workflow)))
              (mode (ptr i8))
              (h f64)] (-> i64)
   (loop (let [ev
@@ -317,7 +378,7 @@
                     command (!= (primitive/iand flags 1048576) 0)]
                 (when (= ty 1)
                   (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
-                    (click! app cv (.x p) (- h (.y p)) h))
+                    (click! app cv flows (.x p) (- h (.y p)) h))
                   0)
                 (when (or (= ty 5) (= ty 6))
                   (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
@@ -348,8 +409,16 @@
                (objc-sel c"stringWithUTF8String:")
                [(ptr i8)]
                c"kCFRunLoopDefaultMode")
-        title (msg (ptr i8) (objc-class c"NSString") (objc-sel c"stringWithUTF8String:") [(ptr i8)] c"coil")]
+        title (msg (ptr i8) (objc-class c"NSString") (objc-sel c"stringWithUTF8String:") [(ptr i8)] c"coil")
+        root (harness-root a)
+        (mut flows) (harness/discover a root "harness")]
     (app-init! app a)
+    (rail-build! app (mut flows))
+    (println "harness root {s} · {d} workflows" root (al-len [harness/Workflow] (load flows)))
+    (when (> (al-len [harness/Workflow] (load flows)) 0)
+      (set! (.selected app) 1)
+      (open-workflow! app (mut flows) 0)
+      0)
     (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
         (do (println "fonts failed to load — run from the project root") 1)
         (do
@@ -366,13 +435,24 @@
                     ;; One clock per frame: every animation is a function of how
                     ;; long ago something happened, never of a frame count.
                     (set! (.now app) (CACurrentMediaTime))
-                    (pump! nsapp app cv mode (primitive/cast f64 HEIGHT))
+                    (pump! nsapp app cv (mut flows) mode (primitive/cast f64 HEIGHT))
                     ;; Closing the window ends the process; there is no menu bar to
                     ;; quit from and a stranded loop would keep the app alive.
                     (when (= (msg i64 win (objc-sel c"isVisible") []) 0) (break) 0)
-                    (when (.running app)
-                      (when (= (% (load frame) 60) 0) (tick! app) 0)
-                      (when (= (% (load frame) 96) 95) (do (advance! app) (rail-sync! app)) 0)
+                    ;; While a run is live, look for the journal it is writing and
+                    ;; reload when it changes. Twice a second is far more often
+                    ;; than a factory produces a step.
+                    (when (and (.running app) (>= (.open app) 0))
+                      (when (= (% (load frame) 30) 29)
+                        (let [w (al-elem [harness/Workflow] (mut flows) (.open app))]
+                          (when (harness/journal-changed? a (harness-root a) w)
+                            (harness/refresh! a (harness-root a) w)
+                            (harness/load-into! app w)
+                            (harness/rebuild-lines! app)
+                            (rail-build! app (mut flows))
+                            0)
+                          0)
+                        0)
                       0)
                     (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
                     (blit! ctx layer)
@@ -427,6 +507,54 @@
                    (count-in-state app "done"))
           0))))
 
+;; The real thing, headless: discover the harness on disk, open a workflow, and
+;; render it. Same code path as the window, so what this writes is what the
+;; window shows.
+(defn render-real [(which i64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        root (harness-root a)
+        (mut flows) (harness/discover a root "harness")
+        n (al-len [harness/Workflow] (load flows))]
+    (app-init! app a)
+    (rail-build! app (mut flows))
+    (println "harness root {s} · {d} workflows" root n)
+    (if (= n 0)
+        (do (println "no factories found — is COIL_HARNESS_ROOT right?") 1)
+        (do
+          (let [(mut i) 0]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (let [w (al-elem [harness/Workflow] (mut flows) (load i))]
+                        (println "  {s}  {d} steps  {d} done  journal={s}"
+                                 (.name w)
+                                 (al-len [(slice u8)] (.workers w))
+                                 (.done w)
+                                 (.journal w))
+                        (set! i (+ (load i) 1))))))
+          (set! (.selected app) (+ which 1))
+          (open-workflow! app (mut flows) which)
+          (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
+              (do (println "fonts failed to load") 1)
+              (do
+                (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+                (write-png ctx c"real.png")
+                (println "wrote real.png · {d} steps · {d} lines"
+                         (step-count app)
+                         (al-len [Line] (.lines app)))
+                0))))))
+
+;; Proves the spawn path without starting an agent run, which costs money and
+;; minutes. If this writes the file, Run will start the harness.
+(defn spawn-test [] (-> i64)
+  (let [a (malloc-allocator)
+        pid (harness/spawn-shell a "echo ok > /tmp/coilgui-spawn.txt")]
+    (println "spawned pid {d}" pid)
+    0))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (if (and (> (primitive/cast i64 argc) 1)
            (= (cstr->str (load (primitive/index argv 1))) "--render"))
@@ -434,4 +562,10 @@
       (if (and (> (primitive/cast i64 argc) 1)
                (= (cstr->str (load (primitive/index argv 1))) "--demo"))
           (demo)
-          (run-window))))
+          (if (and (> (primitive/cast i64 argc) 1)
+                   (= (cstr->str (load (primitive/index argv 1))) "--real"))
+              (render-real 0)
+              (if (and (> (primitive/cast i64 argc) 1)
+                       (= (cstr->str (load (primitive/index argv 1))) "--spawn-test"))
+                  (spawn-test)
+                  (run-window))))))

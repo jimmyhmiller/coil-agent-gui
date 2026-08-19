@@ -7,10 +7,15 @@ AppKit and CoreGraphics with no third-party dependency. The whole binary is
 under 200 KB and opens a window in the time it takes to create one.
 
 ```sh
-coil run                 # the window
-coil run -- --render     # five scene screenshots, no window
-coil run -- --demo       # drive the real state machine from a script, render it
+coil run                    # the window, backed by the harness on disk
+coil run -- --real          # the same, rendered headless to real.png
+coil run -- --render        # five design scenes, no window, scripted data
+coil run -- --demo          # drive the send/run path from a script, render it
+coil run -- --spawn-test    # prove the spawn path without starting an agent
 ```
+
+`COIL_HARNESS_ROOT` points at the harness checkout; it defaults to the sibling
+`../coil-agent-harness`.
 
 Run from the project root; the fonts resolve from `assets/fonts`.
 
@@ -41,16 +46,34 @@ the screen you run it on and the screen you watch it from.
 - Text that elides rather than clipping, one accent colour with one meaning, and
   hairline separation instead of panels.
 
+## What is real
+
+The window is backed by the harness on disk, not by fixtures:
+
+- **Workflows are factories.** `factories/<folder>/factory.json` gives each one
+  its name and its workers, and the workers are the steps in the graph.
+- **State is the journal.** `.factory-runs/<name>/<timestamp>.jsonl` holds the
+  durable event records a run wrote — the same versioned schema the harness's own
+  TUI replays. Step state comes from `run.started` / `run.completed`, and the
+  rail's count is the factory's own `factory.stage.accepted` records.
+- **Conversations are replayed**, not summarised: assistant prose is rebuilt from
+  `model.response.delta`, and every tool call and result is the one that ran.
+  Selecting a different step replays that step out of the journal.
+- **Run starts a run.** It shells out to `./harness factory run <folder>` in the
+  harness directory, exactly as a person would, then watches for the journal the
+  run writes and reloads as it grows.
+
 ## What is not here
 
 - **The planner is scripted.** `planner-respond!` in `src/model.coil` answers
-  from the text you typed rather than from a model. Everything downstream works
-  off the step list, so a real provider call replaces that one function.
-- **Nothing is connected to the harness yet.** The next seam is
-  `service-handle-http` in the harness, which is transport-neutral by design:
-  local work is a direct call, and a step on another machine is the same call
-  over HTTP.
-- No scrolling, no text selection, no resize. The window is a fixed 1440×900.
+  from the text you typed rather than from a model, so typing into a workflow
+  edits the scripted plan rather than talking to a running agent. Sending a
+  message to a live step needs the intervention action the harness does not have
+  yet (`service-request-intervention` accepts `cancel` and nothing else).
+- The design scenes behind `--render` are still fixtures. They are a design
+  tool, not a view of anything.
+- No scrolling (the conversation is anchored to its end, like a terminal), no
+  text selection, no resize. The window is a fixed 1440×900.
 - macOS only.
 
 ## Layout
@@ -65,6 +88,10 @@ the screen you run it on and the screen you watch it from.
   does not.
 - `src/model.coil` — steps, conversation, the planner seam, the run engine.
 - `src/view.coil` — the three panes, and the hit testing that mirrors them.
-- `src/main.coil` — the window, the offscreen renderer, and the scripted run.
+- `src/harness.coil` — the real backing: factories, journals, replay, and the
+  one call that starts a run.
+- `src/dir.coil` — directory listing, adapted from the harness's own, because
+  `coil.fs` reaches files and not directories.
+- `src/main.coil` — the window, the offscreen renderers, and the scripted run.
 
 Fonts are IBM Plex Mono under the SIL Open Font License; see `IBM-Plex-OFL.txt`.
