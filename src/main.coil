@@ -301,29 +301,38 @@
              (cv (ptr Canvas))
              (mode (ptr i8))
              (h f64)] (-> i64)
-  (let [(mut quit) 0]
-    (loop (let [ev
-                  (msg (ptr i8)
-                       nsapp
-                       (objc-sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
-                       [i64 (ptr i8) (ptr i8) i64]
-                       -1
-                       (nil-ptr)
-                       mode
-                       1)]
-            (if (null? ev)
-                (break)
-                (let [ty (msg i64 ev (objc-sel c"type") [])
-                      flags (msg i64 ev (objc-sel c"modifierFlags") [])
-                      command (!= (primitive/iand flags 1048576) 0)]
-                  (when (= ty 10) (key! app ev command) 0)
-                  (when (= ty 1)
-                    (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
-                      (click! app cv (.x p) (- h (.y p)) h))
-                    0)
-                  (msg (ptr i8) nsapp (objc-sel c"sendEvent:") [(ptr i8)] ev)
-                  0))))
-    (load quit)))
+  (loop (let [ev
+                (msg (ptr i8)
+                     nsapp
+                     (objc-sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                     [i64 (ptr i8) (ptr i8) i64]
+                     -1
+                     (nil-ptr)
+                     mode
+                     1)]
+          (if (null? ev)
+              (break)
+              (let [ty (msg i64 ev (objc-sel c"type") [])
+                    flags (msg i64 ev (objc-sel c"modifierFlags") [])
+                    command (!= (primitive/iand flags 1048576) 0)]
+                (when (= ty 1)
+                  (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
+                    (click! app cv (.x p) (- h (.y p)) h))
+                  0)
+                (when (or (= ty 5) (= ty 6))
+                  (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
+                    (hover! app cv (.x p) (- h (.y p)) h))
+                  0)
+                ;; A key this app has handled must NOT continue to the responder
+                ;; chain. Nothing there handles it, and an unhandled key event is
+                ;; precisely what makes AppKit beep on every keystroke.
+                (if (= ty 10)
+                    (key! app ev command)
+                    (if (= ty 11)
+                        0
+                        (do (msg (ptr i8) nsapp (objc-sel c"sendEvent:") [(ptr i8)] ev) 0)))
+                0))))
+  0)
 
 (defn run-window [] (-> i64)
   (let [a (malloc-allocator)
@@ -354,6 +363,9 @@
           (let [layer (msg (ptr i8) (msg (ptr i8) win (objc-sel c"contentView") []) (objc-sel c"layer") [])
                 (mut frame) 0]
             (loop (do
+                    ;; One clock per frame: every animation is a function of how
+                    ;; long ago something happened, never of a frame count.
+                    (set! (.now app) (CACurrentMediaTime))
                     (pump! nsapp app cv mode (primitive/cast f64 HEIGHT))
                     ;; Closing the window ends the process; there is no menu bar to
                     ;; quit from and a stranded loop would keep the app alive.

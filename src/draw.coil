@@ -108,8 +108,18 @@
 
 (extern CTFontCreateWithName :cc c [(ptr i8) f64 (ptr i8)] (-> (ptr i8)))
 
-(defn named-font [(name (ptr i8)) (size f64)] (-> (ptr i8))
-  (CTFontCreateWithName (CFStringCreateWithCString (nil-ptr) name CF_UTF8) size (nil-ptr)))
+;; The fallback face, by path rather than by name: name lookup depends on what
+;; is registered, a path does not. SF Mono carries ⌘, ⏎, ⇧, ●, ✓ and ✗, which is
+;; every typographic symbol IBM Plex Mono is missing here, and its advance at 13
+;; is 8.03 against Plex's 7.8 — close enough that a fallback glyph sits on the
+;; grid without looking borrowed.
+(defn fallback-font [(size f64)] (-> (ptr i8))
+  (let [cf (CFStringCreateWithCString (nil-ptr) c"/System/Library/Fonts/SFNSMono.ttf" CF_UTF8)
+        url (CFURLCreateWithFileSystemPath (nil-ptr) cf 0 0)
+        descs (CTFontManagerCreateFontDescriptorsFromURL url)]
+    (if (null? descs)
+        (nil-ptr)
+        (CTFontCreateWithFontDescriptor (CFArrayGetValueAtIndex descs 0) size (nil-ptr)))))
 
 (defn face-load [(path (ptr i8)) (size f64)] (-> Face)
   (let [face (alloc/stack Face)
@@ -127,7 +137,7 @@
               g (primitive/cast (ptr u16) (glyphs))]
           (CTFontGetGlyphsForCharacters font u g count)
           (set! (.font face) font)
-          (set! (.fb face) (named-font c"Menlo" size))
+          (set! (.fb face) (fallback-font size))
           (set! (.adv face) (CTFontGetAdvancesForGlyphs font 0 g (primitive/cast (ptr CGSize) 0) 1))
           (set! (.ascent face) (CTFontGetAscent font))
           (set! (.descent face) (CTFontGetDescent font))
