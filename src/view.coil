@@ -440,9 +440,19 @@
     ;; Publish how far back there is to go, so the wheel has something to clamp
     ;; against, and clamp the current position in case the content shrank.
     (set! (.scroll-max app) (if (> (load total) room) (- (load total) room) 0.0))
+    ;; Content arrived while the reader was back in the history: move with it, so
+    ;; the lines under their eyes stay under their eyes. Pinned to the end (0)
+    ;; means stay pinned, which is what a live run wants.
+    (when (>= (.anchor app) 0.0)
+      (when (> (.scroll app) 0.0)
+        (set! (.scroll app) (+ (.scroll app) (- (.scroll-max app) (.anchor app))))
+        0)
+      (set! (.anchor app) -1.0)
+      0)
     (when (> (.scroll app) (.scroll-max app))
       (set! (.scroll app) (.scroll-max app))
       0)
+    (when (< (.scroll app) 0.0) (set! (.scroll app) 0.0) 0)
     (let [(mut y)
             (if (< (load total) room)
                 top

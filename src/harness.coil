@@ -29,7 +29,11 @@
    (goal (slice u8))
    (workers (ArrayList (slice u8)))
    (journal (slice u8))
-   (done i64)])
+   (done i64)
+   ;; The size the journal had when it was last read. A run appends, so a
+   ;; changed size is the cheap signal that there is something new to show —
+   ;; cheap enough to ask twice a second without re-reading a megabyte.
+   (bytes i64)])
 
 (defn join [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
   (match (str-concat a x y)
@@ -192,6 +196,7 @@
                       (set! (.workers w) (load steps))
                       (set! (.journal w) (newest-journal a root (.name w)))
                       (set! (.done w) (journal-done-count a (.journal w)))
+                      (set! (.bytes w) (dir/file-size a (.journal w)))
                       (Some (load w))))))))))
 
 ;; Every factory under `<root>/factories`, in directory order.
@@ -402,15 +407,26 @@
 
 ;; Has this workflow's newest journal changed since it was loaded? A running
 ;; factory writes a new file, so a different path means new work to show.
+;; Is there anything new? A run either starts a new journal or appends to the
+;; one it has, so path and size together answer it without reading the file.
 (defn journal-changed? [(a (ptr Allocator))
                         (root (slice u8))
                         (wf (ptr Workflow))] (-> bool)
-  (let [now (newest-journal a root (.name wf))]
-    (!= now (.journal wf))))
+  (if (= (slice-len [u8] (.journal wf)) 0)
+      (> (slice-len [u8] (newest-journal a root (.name wf))) 0)
+      (or (!= (dir/file-size a (.journal wf)) (.bytes wf))
+          (!= (newest-journal a root (.name wf)) (.journal wf)))))
+
+;; Has the factory itself finished? Once it has, there is nothing left to poll.
+(defn run-finished? [(app (ptr App))] (-> bool)
+  (match (str-find (.journal app) "\"event\":\"factory.run.completed\"")
+    (Some [at] true)
+    (None [] false)))
 
 (defn refresh! [(a (ptr Allocator)) (root (slice u8)) (wf (ptr Workflow))] (-> i64)
   (set! (.journal wf) (newest-journal a root (.name wf)))
   (set! (.done wf) (journal-done-count a (.journal wf)))
+  (set! (.bytes wf) (dir/file-size a (.journal wf)))
   0)
 
 ;; ---------------------------------------------------------------- authoring

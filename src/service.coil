@@ -1,0 +1,120 @@
+;; The harness's HTTP service, which is where real agents live.
+;;
+;; Reading journals off disk shows what already happened. Talking to an agent
+;; needs the run service: `POST /v1/runs` starts a real run with the harness's
+;; own tools, `GET /v1/runs/{id}/events?after=N` streams back the same versioned
+;; event records this app already knows how to read, and a stable
+;; `conversation_id` is what makes a second message a reply rather than a new
+;; stranger.
+;;
+;; The service is a child process, not a library: one `harness serve`, started
+;; on loopback with a token this process generates, so nothing is exposed and
+;; nothing needs to be running beforehand.
+(module coilgui.service)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.http.client" :as http)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coilgui.dir" :as dir)
+(import "coilgui.util" :use *)
+
+(defstruct Service
+  [(port i64)
+   (token (slice u8))
+   (root (slice u8))
+   (journal (slice u8))
+   (pid i64)
+   (ready bool)])
+
+(defn base-url [(a (ptr Allocator)) (svc (ptr Service)) (path (slice u8))] (-> (slice u8))
+  (let [(mut out) (sb-new a)]
+    (sb-push-str! (mut out) "http://127.0.0.1:")
+    (sb-push-str! (mut out) (dec-str (.port svc)))
+    (sb-push-str! (mut out) path)
+    (sb-finish! (mut out))))
+
+;; The headers must outlive this call, so they come from the allocator and not
+;; from this frame: a slice into a returned stack array is a dangling pointer
+;; that happens to work until it does not.
+(defn auth-headers [(a (ptr Allocator)) (svc (ptr Service))] (-> (slice http/Header))
+  (let [h (unwrap-ptr [http/Header] (alloc-slice [http/Header] a 2))
+        (mut bearer) (sb-new a)]
+    (sb-push-str! (mut bearer) "Bearer ")
+    (sb-push-str! (mut bearer) (.token svc))
+    (set! (.name (primitive/index h 0)) "Authorization")
+    (set! (.value (primitive/index h 0)) (sb-finish! (mut bearer)))
+    (set! (.name (primitive/index h 1)) "Content-Type")
+    (set! (.value (primitive/index h 1)) "application/json")
+    (slice-new [http/Header] h 2)))
+
+;; One request. A non-2xx status is a normal answer, not a failure: the service
+;; reports refusals and validation errors as JSON bodies worth showing.
+(defn ask [(a (ptr Allocator))
+           (svc (ptr Service))
+           (method (slice u8))
+           (path (slice u8))
+           (body (slice u8))] (-> (Option http/Response))
+  (let [req (alloc/stack http/Request)]
+    (set! (.method req) method)
+    (set! (.url req) (base-url a svc path))
+    (set! (.headers req) (auth-headers a svc))
+    (set! (.body req) body)
+    ;; Short by design: this is called from a window that redraws at 60fps, so a
+    ;; request that cannot answer promptly must fail rather than stall a frame.
+    (set! (.connect-timeout-ms req) 500)
+    (set! (.timeout-ms req) 4000)
+    (set! (.follow-redirects req) false)
+    (match (http/request a req)
+      (Ok [response] (Some response))
+      (Err [e] (None)))))
+
+;; Is a service already answering on this port with this token?
+(defn probe [(a (ptr Allocator)) (svc (ptr Service))] (-> bool)
+  (match (ask a svc "GET" "/v1/tools" "")
+    (Some [r]
+          (let [got r]
+            (and (>= (.status got) 200) (< (.status got) 300))))
+    (None [] false)))
+
+;; A token for this process only. Not a secret against a determined local
+;; attacker; it is what keeps a stray curl from driving the agent.
+(defn make-token [(a (ptr Allocator)) (seed i64)] (-> (slice u8))
+  (let [(mut out) (sb-new a)]
+    (sb-push-str! (mut out) "gui-")
+    (sb-push-str! (mut out) (dec-str seed))
+    (sb-finish! (mut out))))
+
+(defn init! [(svc (ptr Service))
+             (a (ptr Allocator))
+             (root (slice u8))
+             (port i64)
+             (seed i64)] (-> i64)
+  (set! (.port svc) port)
+  (set! (.token svc) (make-token a seed))
+  (set! (.root svc) root)
+  (set! (.journal svc) (join3 root "/.coil-gui-service-" (join2 (dec-str seed) ".jsonl")))
+  (set! (.pid svc) -1)
+  (set! (.ready svc) false)
+  0)
+
+;; Start the service if nothing is answering yet. The journal it writes is this
+;; app's conversation history and outlives the process.
+(defn start! [(a (ptr Allocator)) (svc (ptr Service)) (spawn (fnptr c [(ptr Allocator) (slice u8)] i64))] (-> i64)
+  (if (probe a svc)
+      (do (set! (.ready svc) true) 0)
+      (let [(mut cmd) (sb-new a)]
+        (sb-push-str! (mut cmd) "cd ")
+        (sb-push-str! (mut cmd) (.root svc))
+        (sb-push-str! (mut cmd) " && HARNESS_OPERATOR_TOKEN=")
+        (sb-push-str! (mut cmd) (.token svc))
+        (sb-push-str! (mut cmd) " ./harness serve ")
+        (sb-push-str! (mut cmd) (dec-str (.port svc)))
+        (sb-push-str! (mut cmd) " ")
+        (sb-push-str! (mut cmd) (.journal svc))
+        (sb-push-str! (mut cmd) " >/tmp/coilgui-serve.log 2>&1")
+        (set! (.pid svc) (primitive/call-ptr spawn a (sb-finish! (mut cmd))))
+        0)))

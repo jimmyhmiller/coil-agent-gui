@@ -21,6 +21,7 @@
 (import "coilgui.util" :use *)
 (import "coilgui.view" :use *)
 (import "coilgui.harness" :as harness)
+(import "coilgui.service" :as service)
 
 (const WIDTH 1440)
 (const HEIGHT 900)
@@ -453,7 +454,11 @@
                 ;; pointer is over it.
                 (when (= ty 22)
                   (let [pt (msg CGPoint ev (objc-sel c"locationInWindow") [])
-                        dy (msg f64 ev (objc-sel c"scrollingDeltaY") [])
+                        precise (msg bool ev (objc-sel c"hasPreciseScrollingDeltas") [])
+                        raw (msg f64 ev (objc-sel c"scrollingDeltaY") [])
+                        ;; A trackpad reports points; a wheel reports lines. One
+                        ;; line is about three of these rows.
+                        dy (if precise raw (* raw (* LINE_H 3.0)))
                         geom (alloc/stack Panes)]
                     (store! geom (panes w h))
                     (when (> (.x pt) (.convo-x geom))
@@ -549,14 +554,29 @@
                         (set! cur-scale scale)
                         0)
                       (pump! nsapp app cv (mut flows) mode w h)
+                      ;; While a run is live, ask twice a second whether its
+                      ;; journal grew — a size check, not a re-read — and only
+                      ;; rebuild when it did. Rebuilding on a timer is what made
+                      ;; the text churn.
                       (when (and (.running app) (>= (.open app) 0))
                         (when (= (% (load frame) 30) 29)
                           (let [wf (al-elem [harness/Workflow] (mut flows) (.open app))]
                             (when (harness/journal-changed? a root wf)
-                              (harness/refresh! a root wf)
-                              (harness/load-into! app wf)
-                              (harness/rebuild-lines! app)
-                              (rail-build! app (mut flows))
+                              (let [was-done (.done wf)]
+                                (set! (.anchor app) (.scroll-max app))
+                                (harness/refresh! a root wf)
+                                (harness/load-into! app wf)
+                                (harness/rebuild-lines! app)
+                                ;; The rail only changes when a step finished, so
+                                ;; leave it alone the rest of the time.
+                                (when (!= (.done wf) was-done)
+                                  (rail-build! app (mut flows))
+                                  0)
+                                0)
+                              0)
+                            ;; A finished factory has nothing left to report.
+                            (when (harness/run-finished? app)
+                              (set! (.running app) false)
                               0)
                             0)
                           0)
@@ -586,11 +606,11 @@
             (loop (if (>= (load i) n)
                       (break)
                       (let [w (al-elem [harness/Workflow] (mut flows) (load i))]
-                        (println "  {s}  {d} steps  {d} done  journal={s}"
+                        (println "  {s}  {d} steps  {d} done  {d} bytes"
                                  (.name w)
                                  (al-len [(slice u8)] (.workers w))
                                  (.done w)
-                                 (.journal w))
+                                 (.bytes w))
                         (set! i (+ (load i) 1))))))
           (set! (.selected app) (+ which 1))
           (open-workflow! app (mut flows) which)
@@ -688,6 +708,53 @@
              (al-len [Line] (.lines app)))
     0))
 
+;; Starts the harness service and asks it what tools it has. Proves the whole
+;; transport — spawn, token, loopback HTTP, JSON — without spending a model call.
+(extern fflush :cc c [(ptr i8)] (-> i32))
+
+(defn say [(text (slice u8))] (-> i64)
+  (println "{s}" text)
+  (fflush (cast (ptr i8) 0))
+  0)
+
+(defn serve-probe [(port i64)] (-> i64)
+  (let [a (malloc-allocator)
+        svc (alloc/stack service/Service)
+        root (harness-root a)]
+    (service/init! svc a root port port)
+    (println "root {s} · port {d} · token {s}" root port (.token svc))
+    (fflush (cast (ptr i8) 0))
+    (if (service/probe a svc)
+        (do (println "a service is already answering on this port") 0)
+        (do
+          (service/start! a svc (fnptr-of harness/spawn-shell))
+          (println "spawned pid {d}; waiting for it to answer" (.pid svc))
+          (let [(mut tries) 0
+                (mut up) false]
+            (loop (if (or (>= (load tries) 40) (load up))
+                      (break)
+                      (do
+                        (usleep 250000)
+                        (set! up (service/probe a svc))
+                        (set! tries (+ (load tries) 1)))))
+            (if (not (load up))
+                (do (println "service never answered — see /tmp/coilgui-serve.log") 1)
+                (do
+                  (println "service is up after {d} tries" (load tries))
+                  (match (service/ask a svc "GET" "/v1/tools" "")
+                    (Some [r]
+                          (let [got r]
+                            (println "GET /v1/tools -> {d}" (.status got))
+                            (println "{s}"
+                                     (substr (.body got)
+                                             0
+                                             (if (> (slice-len [u8] (.body got)) 300)
+                                                 300
+                                                 (slice-len [u8] (.body got)))))
+                            0))
+                    (None [] (println "transport failed") 1))
+                  0)))))))
+
 (defn arg-num [(argc i32) (argv (ptr (ptr i8))) (at i64) (fallback f64)] (-> f64)
   (if (<= (cast i64 argc) at)
       fallback
@@ -704,6 +771,7 @@
                          (arg-num argc argv 3 (cast f64 HEIGHT))
                          (arg-num argc argv 4 0.0))
           (= flag "--spawn-test") (spawn-test)
+          (= flag "--serve-test") (serve-probe (cast i64 (arg-num argc argv 2 8787.0)))
           (= flag "--author")
             (author-probe (if (> (cast i64 argc) 2)
                               (cstr->str (load (index argv 2)))

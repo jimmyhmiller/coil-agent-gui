@@ -70,7 +70,11 @@
    ;; points. Zero means pinned to the latest line, which is where a live run
    ;; wants to be.
    (scroll f64)
-   (scroll-max f64)])
+   (scroll-max f64)
+   ;; Set to the old scroll limit when the conversation is about to grow, so the
+   ;; next layout can keep the reader where they were instead of letting new
+   ;; output shove the lines they are reading off the top. -1 when idle.
+   (anchor f64)])
 
 (defn state-word [(s State)] (-> (slice u8))
   (match s
@@ -278,6 +282,7 @@
   (set! (.open app) -1)
   (set! (.scroll app) 0.0)
   (set! (.scroll-max app) 0.0)
+  (set! (.anchor app) -1.0)
   (steps-clear! app)
   (lines-clear! app)
   (rail-fixture! app)
