@@ -1,0 +1,402 @@
+;; Entry point: an offscreen renderer and a window, over the same draw call.
+;;
+;; `--render` writes one PNG per scene without opening anything, which is how the
+;; interface is inspected and reviewed; the window runs the identical `draw-app!`
+;; into a bitmap and hands it to the layer. Nothing about a view can be true in
+;; one mode and false in the other.
+(module coilgui.main)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.args" :as args)
+(import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coilgui.ffi" :use *)
+(import "coilgui.theme" :use *)
+(import "coilgui.draw" :use *)
+(import "coilgui.marks" :use *)
+(import "coilgui.model" :use *)
+(import "coilgui.util" :use *)
+(import "coilgui.view" :use *)
+
+(const WIDTH 1440)
+(const HEIGHT 900)
+
+(defn write-png [(ctx (ptr i8)) (path (ptr i8))] (-> i64)
+  (let [image (CGBitmapContextCreateImage ctx)
+        cf-path (CFStringCreateWithCString (nil-ptr) path CF_UTF8)
+        url (CFURLCreateWithFileSystemPath (nil-ptr) cf-path 0 0)
+        cf-type (CFStringCreateWithCString (nil-ptr) c"public.png" CF_UTF8)
+        dest (CGImageDestinationCreateWithURL url cf-type 1 (nil-ptr))]
+    (CGImageDestinationAddImage dest image (nil-ptr))
+    (CGImageDestinationFinalize dest)
+    (CGImageRelease image)
+    0))
+
+(defn set-input! [(app (ptr App)) (text (slice u8))] (-> i64)
+  (let [(mut fresh) (al-new [u8] (.alc app))
+        n (slice-len [u8] text)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (al-push! [u8] (mut fresh) (slice-get [u8] text (load i)))
+                (set! i (+ (load i) 1)))))
+    (set! (.input app) (load fresh))
+    0))
+
+(defn set-state! [(app (ptr App)) (at i64) (st State) (secs i64)] (-> i64)
+  (let [s (step-at app at)]
+    (set! (.state s) st)
+    (set! (.secs s) secs)
+    0))
+
+;; The conversation that produced the plan. In the running scenes the right pane
+;; shows the focused step's own transcript instead.
+(defn plan-conversation! [(app (ptr App))] (-> i64)
+  (lines-clear! app)
+  (push-line! app (mk-line (You) "move the json writer onto the arena, and check" ""))
+  (push-line! app (mk-line (Cont) "nothing else allocates its own buffer" ""))
+  (push-line! app (mk-line (Agent) "Four steps. I read the three writers first, then" ""))
+  (push-line! app (mk-line (Cont) "port the writer and the reader, then run the json" ""))
+  (push-line! app (mk-line (Cont) "tests over both." ""))
+  (push-line! app (mk-line (Agent) "The reader is the risky one — providers depend on" ""))
+  (push-line! app (mk-line (Cont) "its signature. Say the word and I will drop it." ""))
+  (push-line! app (mk-line (You) "keep it, but run the tests before the reader lands" ""))
+  (push-line! app (mk-line (Agent) "Done — test depends on the writer only now." ""))
+  0)
+
+(defn running-conversation! [(app (ptr App))] (-> i64)
+  (lines-clear! app)
+  (push-line! app (mk-line (Tool) "Read  src/core/json.coil" ""))
+  (push-line! app (mk-line (Result) "561 lines" ""))
+  (push-line! app (mk-line (Agent) "The arena is only threaded through the writer. The" ""))
+  (push-line! app (mk-line (Cont) "reader still takes an allocator argument." ""))
+  (push-line! app (mk-line (Tool) "Edit  src/core/json.coil" "+18 −6"))
+  (push-line! app (mk-line (Tool) "Bash  cargo test json" ""))
+  (push-line! app (mk-line (Result) "running…" ""))
+  (push-line! app (mk-line (Pending) "leave the reader alone for now — providers" ""))
+  0)
+
+(defn asks-conversation! [(app (ptr App))] (-> i64)
+  (lines-clear! app)
+  (push-line! app (mk-line (Tool) "Read  src/providers/openai_chat_wire.coil" ""))
+  (push-line! app (mk-line (Result) "360 lines" ""))
+  (push-line! app (mk-line (Agent) "The reader signature is public. Changing it breaks" ""))
+  (push-line! app (mk-line (Cont) "two providers unless I port them in this step too." ""))
+  (push-line! app (mk-line (Asks) "approve, or say what to do instead" ""))
+  0)
+
+(defn done-conversation! [(app (ptr App))] (-> i64)
+  (lines-clear! app)
+  (push-line! app (mk-line (Tool) "Bash  cargo test json" ""))
+  (push-line! app (mk-line (Result) "47 passed" ""))
+  (push-line! app (mk-line (Agent) "All four steps done. The wire codec still has its" ""))
+  (push-line! app (mk-line (Cont) "own buffer — it was outside what you asked for." ""))
+  (push-line! app (mk-line (You) "now do the same for the wire codec" ""))
+  (push-line! app (mk-line (Agent) "One step, same shape. Run it and I will start." ""))
+  0)
+
+(defn scene! [(app (ptr App)) (which Scene)] (-> i64)
+  (set! (.scene app) which)
+  (set-input! app "")
+  (match which
+    (SceneNew []
+              (do
+                (steps-clear! app)
+                (lines-clear! app)
+                (set! (.title app) "untitled")
+                (set! (.selected app) 1)
+                0))
+    (ScenePlan []
+               (do
+                 (propose-plan! app)
+                 (plan-conversation! app)
+                 (set! (.focus app) 1)
+                 0))
+    (SceneRunning []
+                  (do
+                    (propose-plan! app)
+                    (set-state! app 0 (SDone) 22)
+                    (set-state! app 1 (SRunning) 252)
+                    (running-conversation! app)
+                    (set! (.focus app) 1)
+                    0))
+    (SceneAsks []
+               (do
+                 (propose-plan! app)
+                 (set-state! app 0 (SDone) 22)
+                 (set-state! app 1 (SDone) 220)
+                 (set-state! app 2 (SAsks) 65)
+                 (asks-conversation! app)
+                 (set! (.focus app) 2)
+                 0))
+    (SceneDone []
+               (do
+                 (propose-plan! app)
+                 (set-state! app 0 (SDone) 22)
+                 (set-state! app 1 (SDone) 220)
+                 (set-state! app 2 (SDone) 138)
+                 (set-state! app 3 (SDone) 31)
+                 (done-conversation! app)
+                 (set! (.focus app) 3)
+                 0)))
+  0)
+
+(defn render-scene! [(app (ptr App)) (cv (ptr Canvas)) (ctx (ptr i8)) (which Scene) (path (ptr i8))] (-> i64)
+  (scene! app which)
+  (rail-sync! app)
+  (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+  (write-png ctx path)
+  0)
+
+(defn render-all [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)]
+    (app-init! app a)
+    (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
+        (do (println "fonts failed to load — run from the project root") 1)
+        (do
+          (render-scene! app cv ctx (SceneNew) c"shot-1-new.png")
+          (render-scene! app cv ctx (ScenePlan) c"shot-2-plan.png")
+          (render-scene! app cv ctx (SceneRunning) c"shot-3-running.png")
+          (render-scene! app cv ctx (SceneAsks) c"shot-4-asks.png")
+          (render-scene! app cv ctx (SceneDone) c"shot-5-done.png")
+          (println "wrote 5 screenshots")
+          0))))
+
+;; ---------------------------------------------------------------- interaction
+
+(defn send! [(app (ptr App))] (-> i64)
+  (let [a (.alc app)
+        text (own-str a (input-slice app))]
+    (if (= (slice-len [u8] text) 0)
+        0
+        (let [asking (first-in-state app "asks")]
+          (push-wrapped! app (You) text 52)
+          (input-clear! app)
+          (if (>= asking 0)
+              (do
+                (set! (.state (step-at app asking)) (SRunning))
+                (push-wrapped! app (Agent) "Approved. Carrying on from where it stopped." 52)
+                (set! (.running app) true)
+                0)
+              (planner-respond! app text))
+          (rail-sync! app)
+          0))))
+
+(defn focus-next! [(app (ptr App))] (-> i64)
+  (let [n (step-count app)]
+    (when (> n 0)
+      (store! (field app focus) (% (+ (.focus app) 1) n))
+      0)
+    0))
+
+(defn new-workflow! [(app (ptr App))] (-> i64)
+  (steps-clear! app)
+  (lines-clear! app)
+  (input-clear! app)
+  (set! (.title app) "untitled")
+  (set! (.running app) false)
+  (set! (.focus app) 0)
+  (set! (.selected app) 1)
+  (rail-sync! app)
+  0)
+
+(defn click! [(app (ptr App)) (cv (ptr Canvas)) (px f64) (py f64) (h f64)] (-> i64)
+  (cond (< py HEADER)
+          (if (run-hit cv app px py)
+              (do (run-start! app) (rail-sync! app) 0)
+              0)
+        (< px RAIL_W)
+          (let [hit (rail-hit app py)]
+            (if (>= hit 0) (do (store! (field app selected) hit) 0) 0))
+        (< px (+ RAIL_W GRAPH_W))
+          (let [hit (node-hit app px py h)]
+            (if (>= hit 0) (do (store! (field app focus) hit) 0) 0))
+        :else 0))
+
+(defn key! [(app (ptr App)) (ev (ptr i8)) (command bool)] (-> i64)
+  (let [chars (msg (ptr i8) ev (objc-sel c"characters") [])]
+    (if (null? chars)
+        0
+        (let [utf (msg (ptr i8) chars (objc-sel c"UTF8String") [])
+              n (strlen utf)
+              first (primitive/cast i64 (load (primitive/cast (ptr u8) utf)))]
+          (if command
+              (cond (= first 110) (new-workflow! app)
+                    (or (= first 13) (= first 10))
+                      (if (and (> (step-count app) 0) (not (started? app)))
+                          (do (run-start! app) (rail-sync! app) 0)
+                          0)
+                    :else 0)
+              (cond (or (= first 13) (= first 10)) (send! app)
+                    (= first 127) (input-backspace! app)
+                    (= first 27) (input-clear! app)
+                    (= first 9) (focus-next! app)
+                    (>= first 32)
+                      (let [(mut i) 0]
+                        (loop (if (>= (load i) n)
+                                  (break)
+                                  (do
+                                    (input-push! app
+                                                 (load (primitive/index (primitive/cast (ptr u8) utf)
+                                                                        (load i))))
+                                    (store! i (+ (load i) 1)))))
+                        0)
+                    :else 0))))))
+
+;; ---------------------------------------------------------------- window
+
+(defn make-window [(w f64) (h f64)] (-> (ptr i8))
+  (let [r (alloc/stack CGRect)
+        alloc-win (msg (ptr i8) (objc-class c"NSWindow") (objc-sel c"alloc") [])]
+    (set! (.x r) 120.0)
+    (set! (.y r) 120.0)
+    (set! (.w r) w)
+    (set! (.h r) h)
+    (msg (ptr i8)
+         alloc-win
+         (objc-sel c"initWithContentRect:styleMask:backing:defer:")
+         [CGRect i64 i64 i64]
+         (load r)
+         7
+         2
+         0)))
+
+(defn blit! [(ctx (ptr i8)) (layer (ptr i8))] (-> i64)
+  (let [image (CGBitmapContextCreateImage ctx)]
+    (msg (ptr i8) layer (objc-sel c"setContents:") [(ptr i8)] image)
+    (CGImageRelease image)
+    0))
+
+(defn pump! [(nsapp (ptr i8))
+             (app (ptr App))
+             (cv (ptr Canvas))
+             (mode (ptr i8))
+             (h f64)] (-> i64)
+  (let [(mut quit) 0]
+    (loop (let [ev
+                  (msg (ptr i8)
+                       nsapp
+                       (objc-sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                       [i64 (ptr i8) (ptr i8) i64]
+                       -1
+                       (nil-ptr)
+                       mode
+                       1)]
+            (if (null? ev)
+                (break)
+                (let [ty (msg i64 ev (objc-sel c"type") [])
+                      flags (msg i64 ev (objc-sel c"modifierFlags") [])
+                      command (!= (primitive/iand flags 1048576) 0)]
+                  (when (= ty 10) (key! app ev command) 0)
+                  (when (= ty 1)
+                    (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
+                      (click! app cv (.x p) (- h (.y p)) h))
+                    0)
+                  (msg (ptr i8) nsapp (objc-sel c"sendEvent:") [(ptr i8)] ev)
+                  0))))
+    (load quit)))
+
+(defn run-window [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        nsapp (msg (ptr i8) (objc-class c"NSApplication") (objc-sel c"sharedApplication") [])
+        win (make-window (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+        mode
+          (msg (ptr i8)
+               (objc-class c"NSString")
+               (objc-sel c"stringWithUTF8String:")
+               [(ptr i8)]
+               c"kCFRunLoopDefaultMode")
+        title (msg (ptr i8) (objc-class c"NSString") (objc-sel c"stringWithUTF8String:") [(ptr i8)] c"coil")]
+    (app-init! app a)
+    (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
+        (do (println "fonts failed to load — run from the project root") 1)
+        (do
+          (msg (ptr i8) nsapp (objc-sel c"setActivationPolicy:") [i64] 0)
+          (msg (ptr i8) win (objc-sel c"setTitle:") [(ptr i8)] title)
+          (msg (ptr i8) (msg (ptr i8) win (objc-sel c"contentView") []) (objc-sel c"setWantsLayer:") [i64] 1)
+          (msg (ptr i8) win (objc-sel c"makeKeyAndOrderFront:") [(ptr i8)] (nil-ptr))
+          (msg (ptr i8) nsapp (objc-sel c"activateIgnoringOtherApps:") [i64] 1)
+          (msg (ptr i8) nsapp (objc-sel c"finishLaunching") [])
+          (let [layer (msg (ptr i8) (msg (ptr i8) win (objc-sel c"contentView") []) (objc-sel c"layer") [])
+                (mut frame) 0]
+            (loop (do
+                    (pump! nsapp app cv mode (primitive/cast f64 HEIGHT))
+                    ;; Closing the window ends the process; there is no menu bar to
+                    ;; quit from and a stranded loop would keep the app alive.
+                    (when (= (msg i64 win (objc-sel c"isVisible") []) 0) (break) 0)
+                    (when (.running app)
+                      (when (= (% (load frame) 60) 0) (tick! app) 0)
+                      (when (= (% (load frame) 96) 95) (do (advance! app) (rail-sync! app)) 0)
+                      0)
+                    (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+                    (blit! ctx layer)
+                    (set! frame (+ (load frame) 1))
+                    (usleep 16000))))
+          0))))
+
+;; ---------------------------------------------------------------- scripted run
+;;
+;; Drives the real state machine through the real send/run path and renders each
+;; step, so the interactive flow can be checked without clicking anything. If
+;; this and the window ever disagree, the window is wrong: they call the same
+;; functions.
+(defn type-and-send! [(app (ptr App)) (text (slice u8))] (-> i64)
+  (set-input! app text)
+  (send! app)
+  0)
+
+(defn demo [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)]
+    (app-init! app a)
+    (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
+        (do (println "fonts failed to load — run from the project root") 1)
+        (do
+          (new-workflow! app)
+          (type-and-send! app "port the json writer onto the arena")
+          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+          (write-png ctx c"demo-1-planned.png")
+
+          (type-and-send! app "add bench")
+          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+          (write-png ctx c"demo-2-added.png")
+
+          (type-and-send! app "drop bench")
+          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+          (write-png ctx c"demo-3-dropped.png")
+
+          (run-start! app)
+          (advance! app)
+          (advance! app)
+          (rail-sync! app)
+          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+          (write-png ctx c"demo-4-running.png")
+
+          (println "steps {d} · running {d} · done {d}"
+                   (step-count app)
+                   (count-in-state app "running")
+                   (count-in-state app "done"))
+          0))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (and (> (primitive/cast i64 argc) 1)
+           (= (cstr->str (load (primitive/index argv 1))) "--render"))
+      (render-all)
+      (if (and (> (primitive/cast i64 argc) 1)
+               (= (cstr->str (load (primitive/index argv 1))) "--demo"))
+          (demo)
+          (run-window))))

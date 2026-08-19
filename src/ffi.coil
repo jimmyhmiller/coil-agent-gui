@@ -1,0 +1,96 @@
+;; Every C declaration the app makes, in one module.
+;;
+;; Coil does not dedupe `extern` across modules, so they all live here and
+;; everything else imports this. The structs are the CoreGraphics value types;
+;; they cross the ABI by value, which Coil does correctly.
+(module coilgui.ffi)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+(defstruct CGPoint [(x f64) (y f64)])
+(defstruct CGSize [(w f64) (h f64)])
+(defstruct CGAffine [(a f64) (b f64) (c f64) (d f64) (tx f64) (ty f64)])
+
+(extern CGColorSpaceCreateDeviceRGB :cc c [] (-> (ptr i8)))
+(extern CGColorSpaceRelease :cc c [(ptr i8)] (-> i64))
+(extern CGBitmapContextCreate :cc c [(ptr i8) i64 i64 i64 i64 (ptr i8) i64] (-> (ptr i8)))
+(extern CGBitmapContextCreateImage :cc c [(ptr i8)] (-> (ptr i8)))
+(extern CGContextRelease :cc c [(ptr i8)] (-> i64))
+(extern CGImageRelease :cc c [(ptr i8)] (-> i64))
+(extern CGContextSetRGBFillColor :cc c [(ptr i8) f64 f64 f64 f64] (-> i64))
+(extern CGContextSetRGBStrokeColor :cc c [(ptr i8) f64 f64 f64 f64] (-> i64))
+(extern CGContextFillRect :cc c [(ptr i8) CGRect] (-> i64))
+(extern CGContextStrokeRectWithWidth :cc c [(ptr i8) CGRect f64] (-> i64))
+(extern CGContextFillEllipseInRect :cc c [(ptr i8) CGRect] (-> i64))
+(extern CGContextStrokeEllipseInRect :cc c [(ptr i8) CGRect] (-> i64))
+(extern CGContextSetLineCap :cc c [(ptr i8) i64] (-> i64))
+(extern CGContextSetLineWidth :cc c [(ptr i8) f64] (-> i64))
+(extern CGContextSetLineDash :cc c [(ptr i8) f64 (ptr f64) i64] (-> i64))
+(extern CGContextBeginPath :cc c [(ptr i8)] (-> i64))
+(extern CGContextMoveToPoint :cc c [(ptr i8) f64 f64] (-> i64))
+(extern CGContextAddLineToPoint :cc c [(ptr i8) f64 f64] (-> i64))
+(extern CGContextFillPath :cc c [(ptr i8)] (-> i64))
+(extern CGContextStrokePath :cc c [(ptr i8)] (-> i64))
+(extern CGContextSaveGState :cc c [(ptr i8)] (-> i64))
+(extern CGContextRestoreGState :cc c [(ptr i8)] (-> i64))
+(extern CGContextClipToRect :cc c [(ptr i8) CGRect] (-> i64))
+(extern CGContextScaleCTM :cc c [(ptr i8) f64 f64] (-> i64))
+(extern CGContextTranslateCTM :cc c [(ptr i8) f64 f64] (-> i64))
+(extern CGContextSetTextMatrix :cc c [(ptr i8) CGAffine] (-> i64))
+(extern CGContextSetAllowsAntialiasing :cc c [(ptr i8) bool] (-> i64))
+
+(extern CFStringCreateWithCString :cc c [(ptr i8) (ptr i8) i32] (-> (ptr i8)))
+(extern CFURLCreateWithFileSystemPath :cc c [(ptr i8) (ptr i8) i64 i64] (-> (ptr i8)))
+(extern CFArrayGetValueAtIndex :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern CFRelease :cc c [(ptr i8)] (-> i64))
+
+(extern CGImageDestinationCreateWithURL :cc c [(ptr i8) (ptr i8) i64 (ptr i8)] (-> (ptr i8)))
+(extern CGImageDestinationAddImage :cc c [(ptr i8) (ptr i8) (ptr i8)] (-> i64))
+(extern CGImageDestinationFinalize :cc c [(ptr i8)] (-> i64))
+
+(extern CTFontManagerCreateFontDescriptorsFromURL :cc c [(ptr i8)] (-> (ptr i8)))
+(extern CTFontCreateWithFontDescriptor :cc c [(ptr i8) f64 (ptr i8)] (-> (ptr i8)))
+(extern CTFontGetGlyphsForCharacters :cc c [(ptr i8) (ptr u16) (ptr u16) i64] (-> bool))
+(extern CTFontGetAdvancesForGlyphs :cc c [(ptr i8) i64 (ptr u16) (ptr CGSize) i64] (-> f64))
+(extern CTFontGetAscent :cc c [(ptr i8)] (-> f64))
+(extern CTFontGetDescent :cc c [(ptr i8)] (-> f64))
+(extern CTFontDrawGlyphs :cc c [(ptr i8) (ptr u16) (ptr CGPoint) i64 (ptr i8)] (-> i64))
+
+(extern usleep :cc c [i64] (-> i64))
+(extern strlen :cc c [(ptr i8)] (-> i64))
+(extern objc_getClass :cc c [(ptr i8)] (-> (ptr i8)))
+(extern sel_registerName :cc c [(ptr i8)] (-> (ptr i8)))
+(extern objc_msgSend :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(const CF_UTF8 0x08000100)
+
+(defn nil-ptr [] (-> (ptr i8))
+  (primitive/cast (ptr i8) 0))
+
+(defn null? [(p (ptr i8))] (-> bool)
+  (= (primitive/cast i64 p) 0))
+
+(defn cg-rect [(x f64) (y f64) (w f64) (h f64)] (-> CGRect)
+  (let [r (alloc/stack CGRect)]
+    (set! (.x r) x)
+    (set! (.y r) y)
+    (set! (.w r) w)
+    (set! (.h r) h)
+    (load r)))
+
+;; Class lookup and selector registration.
+(defn objc-class [(n (ptr i8))] (-> (ptr i8))
+  (objc_getClass n))
+(defn objc-sel [(n (ptr i8))] (-> (ptr i8))
+  (sel_registerName n))
+
+;; (msg RET RECV SEL [ARGTYPES...] ARGS...) retypes objc_msgSend per call site,
+;; because one symbol serves every selector ABI.
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(primitive/call-ptr (primitive/cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret)
+                                       (primitive/fnptr-of objc_msgSend))
+                       ~recv
+                       ~selector
+                       ~@args))

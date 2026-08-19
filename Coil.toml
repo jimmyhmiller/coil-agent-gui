@@ -1,0 +1,8 @@
+[package]
+name = "coilgui"
+entry = "src/main.coil"
+source-roots = ["src"]
+
+[link]
+frameworks = ["AppKit", "CoreGraphics", "CoreText", "ImageIO", "CoreFoundation"]
+libs = ["objc"]

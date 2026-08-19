@@ -1,0 +1,78 @@
+;; Small string formatting for labels the interface builds at draw time.
+;;
+;; A ring of static buffers rather than an allocator: every result is consumed by
+;; the draw call on the next line, and a frame never holds more than a handful at
+;; once. The ring size is the only thing keeping that true, so it is generous.
+(module coilgui.util)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+
+(const RING 16)
+(const CELL 64)
+
+(defn ring-buf [] (-> (ptr (array u8 1024)))
+  (alloc/static (array u8 1024)))
+(defn ring-at [] (-> (ptr i64))
+  (alloc/static i64))
+
+(defn next-cell [] (-> (ptr u8))
+  (let [slot (load (ring-at))
+        base (primitive/cast (ptr u8) (ring-buf))]
+    (set! (ring-at) (% (+ slot 1) RING))
+    (primitive/index base (* slot CELL))))
+
+(defn copy-into [(dst (ptr u8)) (at i64) (s (slice u8))] (-> i64)
+  (let [n (slice-len [u8] s)
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (>= (+ at (load i)) CELL))
+              (break)
+              (do
+                (set! (primitive/index dst (+ at (load i))) (slice-get [u8] s (load i)))
+                (set! i (+ (load i) 1)))))
+    (+ at (load i))))
+
+;; Decimal, no allocation. Negative values are not expected here and render "0".
+(defn dec-str [(v i64)] (-> (slice u8))
+  (let [cell (next-cell)
+        digits (alloc/stack (array u8 24))
+        (mut n) (if (< v 0) 0 v)
+        (mut count) 0]
+    (if (= (load n) 0)
+        (do
+          (set! (primitive/index (primitive/cast (ptr u8) digits) 0) (primitive/cast u8 48))
+          (set! count 1))
+        (loop (if (<= (load n) 0)
+                  (break)
+                  (do
+                    (set! (primitive/index (primitive/cast (ptr u8) digits) (load count))
+                          (primitive/cast u8 (+ 48 (% (load n) 10))))
+                    (set! n (/ (load n) 10))
+                    (set! count (+ (load count) 1))))))
+    (let [total (load count)
+          (mut k) 0]
+      (loop (if (>= (load k) total)
+                (break)
+                (do
+                  (set! (primitive/index cell (load k))
+                        (load (primitive/index (primitive/cast (ptr u8) digits)
+                                               (- (- total 1) (load k)))))
+                  (set! k (+ (load k) 1)))))
+      (slice-new [u8] cell total))))
+
+(defn join2 [(a (slice u8)) (b (slice u8))] (-> (slice u8))
+  (let [cell (next-cell)
+        end (copy-into cell (copy-into cell 0 a) b)]
+    (slice-new [u8] cell end)))
+
+(defn join3 [(a (slice u8)) (b (slice u8)) (c (slice u8))] (-> (slice u8))
+  (let [cell (next-cell)
+        end (copy-into cell (copy-into cell (copy-into cell 0 a) b) c)]
+    (slice-new [u8] cell end)))
+
+;; mm:ss from a tick count, for the elapsed clock.
+(defn clock-str [(seconds i64)] (-> (slice u8))
+  (let [m (/ seconds 60)
+        s (% seconds 60)]
+    (join3 (dec-str m) (if (< s 10) ":0" ":") (dec-str s))))

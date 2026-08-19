@@ -1,0 +1,51 @@
+;; One ground, two hairlines, three inks, three signals.
+;;
+;; Nine values and one typeface. Amber means now, green means done, red means
+;; wrong; nothing else carries colour, so a busy screen still reads at a glance.
+(module coilgui.theme)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+
+(defstruct Color [(r f64) (g f64) (b f64)])
+
+(defn col [(r i64) (g i64) (b i64)] (-> Color)
+  (let [c (alloc/stack Color)]
+    (set! (.r c) (/ (primitive/cast f64 r) 255.0))
+    (set! (.g c) (/ (primitive/cast f64 g) 255.0))
+    (set! (.b c) (/ (primitive/cast f64 b) 255.0))
+    (load c)))
+
+(defn ground [] (-> Color)
+  (col 16 15 13))
+(defn line-quiet [] (-> Color)
+  (col 30 28 23))
+(defn line [] (-> Color)
+  (col 42 39 33))
+(defn ink3 [] (-> Color)
+  (col 96 92 82))
+(defn ink2 [] (-> Color)
+  (col 160 154 140))
+(defn ink1 [] (-> Color)
+  (col 230 224 212))
+(defn amber [] (-> Color)
+  (col 217 160 59))
+(defn green [] (-> Color)
+  (col 125 163 92))
+(defn red [] (-> Color)
+  (col 196 99 79))
+;; The one non-palette value: an amber wash behind a selected row, dark enough
+;; that the hairline grid still wins.
+(defn amber-wash [] (-> Color)
+  (col 25 21 16))
+
+(const HEADER 46.0)
+(const ROW 30.0)
+(const NODE_W 118.0)
+(const NODE_H 30.0)
+(const RAIL_W 260.0)
+(const GRAPH_W 620.0)
+(const GUTTER_RAIL 18.0)
+(const GUTTER_PANE 22.0)
+(const HAIRLINE 1.0)
+(const LINE_H 22.0)

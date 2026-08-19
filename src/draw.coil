@@ -1,0 +1,277 @@
+;; The CoreGraphics backend: the whole drawing vocabulary of the app.
+;;
+;; Everything above this file works in top-down coordinates, like the design
+;; does; the y flip to CoreGraphics' native space happens here and nowhere else.
+;; Text is drawn as glyphs rather than through a typesetter because the whole
+;; interface is one monospaced face, which makes measurement exact and cheap.
+(module coilgui.draw)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coilgui.ffi" :use *)
+(import "coilgui.theme" :use *)
+
+(defstruct Face [(font (ptr i8)) (adv f64) (ascent f64) (descent f64)])
+
+(defstruct Canvas
+  [(ctx (ptr i8))
+   (height f64)
+   (f11 Face)
+   (f12 Face)
+   (f13 Face)
+   (m12 Face)
+   (m13 Face)])
+
+(defn units [] (-> (ptr (array u16 512)))
+  (alloc/static (array u16 512)))
+(defn glyphs [] (-> (ptr (array u16 512)))
+  (alloc/static (array u16 512)))
+(defn spots [] (-> (ptr (array CGPoint 512)))
+  (alloc/static (array CGPoint 512)))
+
+;; UTF-8 to UTF-16, BMP only: the interface uses a fixed set of glyphs and none
+;; of them is above U+FFFF. Anything that is becomes U+FFFD rather than a
+;; silently malformed surrogate. Returns the unit count.
+(defn to-utf16 [(text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        out (primitive/cast (ptr u16) (units))
+        (mut i) 0
+        (mut count) 0]
+    (loop (if (or (>= (load i) n) (>= (load count) 512))
+              (break)
+              (let [b (primitive/cast i64 (slice-get [u8] text (load i)))
+                    (mut cp) 0
+                    (mut width) 1]
+                (cond (< b 0x80) (store! cp b)
+                      (< b 0xE0)
+                        (do
+                          (store! width 2)
+                          (store! cp
+                                  (primitive/ior (primitive/ishl (primitive/iand b 0x1F) 6)
+                                                 (primitive/iand (primitive/cast i64
+                                                                                 (slice-get [u8]
+                                                                                            text
+                                                                                            (+ (load i)
+                                                                                               1)))
+                                                                 0x3F))))
+                      (< b 0xF0)
+                        (do
+                          (store! width 3)
+                          (store! cp
+                                  (primitive/ior (primitive/ishl (primitive/iand b 0x0F) 12)
+                                                 (primitive/ior (primitive/ishl (primitive/iand (primitive/cast i64
+                                                                                                                (slice-get [u8]
+                                                                                                                           text
+                                                                                                                           (+ (load i)
+                                                                                                                              1)))
+                                                                                                0x3F)
+                                                                                6)
+                                                                (primitive/iand (primitive/cast i64
+                                                                                                (slice-get [u8]
+                                                                                                           text
+                                                                                                           (+ (load i)
+                                                                                                              2)))
+                                                                                0x3F)))))
+                      :else (do (store! width 4) (store! cp 0xFFFD)))
+                (set! (primitive/index out (load count)) (primitive/cast u16 (load cp)))
+                (set! count (+ (load count) 1))
+                (set! i (+ (load i) (load width))))))
+    (load count)))
+
+;; Displayed length in characters, which for one monospaced face is all the
+;; measurement anything needs.
+(defn text-cells [(text (slice u8))] (-> i64)
+  (to-utf16 text))
+
+(defn text-width [(face (ptr Face)) (text (slice u8))] (-> f64)
+  (* (primitive/cast f64 (text-cells text)) (.adv face)))
+
+;; Right-aligned run: the x a string of this width would start at.
+(defn text-right [(face (ptr Face)) (right f64) (text (slice u8))] (-> f64)
+  (- right (text-width face text)))
+
+(defn face-load [(path (ptr i8)) (size f64)] (-> Face)
+  (let [face (alloc/stack Face)
+        cf (CFStringCreateWithCString (nil-ptr) path CF_UTF8)
+        url (CFURLCreateWithFileSystemPath (nil-ptr) cf 0 0)
+        descs (CTFontManagerCreateFontDescriptorsFromURL url)]
+    (if (null? descs)
+        (do
+          (set! (.font face) (nil-ptr))
+          (load face))
+        (let [font (CTFontCreateWithFontDescriptor (CFArrayGetValueAtIndex descs 0) size (nil-ptr))
+              count (to-utf16 "M")
+              u (primitive/cast (ptr u16) (units))
+              g (primitive/cast (ptr u16) (glyphs))]
+          (CTFontGetGlyphsForCharacters font u g count)
+          (set! (.font face) font)
+          (set! (.adv face) (CTFontGetAdvancesForGlyphs font 0 g (primitive/cast (ptr CGSize) 0) 1))
+          (set! (.ascent face) (CTFontGetAscent font))
+          (set! (.descent face) (CTFontGetDescent font))
+          (load face)))))
+
+;; `scale` is the device pixel ratio: the bitmap is that many times larger than
+;; the layout, and everything above this line keeps working in points.
+(defn canvas-init [(cv (ptr Canvas)) (ctx (ptr i8)) (height f64) (scale f64)] (-> i64)
+  (let [flip (alloc/stack CGAffine)]
+    (CGContextScaleCTM ctx scale scale)
+    (set! (.ctx cv) ctx)
+    (set! (.height cv) height)
+    (set! (.f11 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 11.0))
+    (set! (.f12 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 12.0))
+    (set! (.f13 cv) (face-load c"assets/fonts/IBMPlexMono-Regular.ttf" 13.0))
+    (set! (.m12 cv) (face-load c"assets/fonts/IBMPlexMono-Medium.ttf" 12.0))
+    (set! (.m13 cv) (face-load c"assets/fonts/IBMPlexMono-Medium.ttf" 13.0))
+    (set! (.a flip) 1.0)
+    (set! (.b flip) 0.0)
+    (set! (.c flip) 0.0)
+    (set! (.d flip) 1.0)
+    (set! (.tx flip) 0.0)
+    (set! (.ty flip) 0.0)
+    (CGContextSetTextMatrix ctx (load flip))
+    (if (null? (.font (field cv f13))) 1 0)))
+
+(defn set-fill! [(cv (ptr Canvas)) (c Color)] (-> i64)
+  (CGContextSetRGBFillColor (.ctx cv)
+                            (.r c)
+                            (.g c)
+                            (.b c)
+                            1.0))
+
+(defn set-stroke! [(cv (ptr Canvas)) (c Color)] (-> i64)
+  (CGContextSetRGBStrokeColor (.ctx cv)
+                              (.r c)
+                              (.g c)
+                              (.b c)
+                              1.0))
+
+;; Top-down y to CoreGraphics' bottom-up origin.
+(defn flip-y [(cv (ptr Canvas)) (y f64) (h f64)] (-> f64)
+  (- (- (.height cv) y) h))
+
+(defn fill! [(cv (ptr Canvas)) (x f64) (y f64) (w f64) (h f64) (c Color)] (-> i64)
+  (set-fill! cv c)
+  (CGContextFillRect (.ctx cv) (cg-rect x (flip-y cv y h) w h)))
+
+;; A hairline is a filled one-pixel rect rather than a stroked path: a stroke
+;; straddles the coordinate and lands on two device rows at 1x.
+(defn hline! [(cv (ptr Canvas)) (x f64) (y f64) (w f64) (c Color)] (-> i64)
+  (fill! cv x y w HAIRLINE c))
+
+(defn vline! [(cv (ptr Canvas)) (x f64) (y f64) (h f64) (c Color)] (-> i64)
+  (fill! cv x y HAIRLINE h c))
+
+(defn box! [(cv (ptr Canvas)) (x f64) (y f64) (w f64) (h f64) (c Color)] (-> i64)
+  (hline! cv x y w c)
+  (hline! cv x (- (+ y h) HAIRLINE) w c)
+  (vline! cv x y h c)
+  (vline! cv (- (+ x w) HAIRLINE) y h c))
+
+(defn dashes [] (-> (ptr (array f64 2)))
+  (alloc/static (array f64 2)))
+
+(defn path! [(cv (ptr Canvas)) (c Color) (dashed bool)] (-> i64)
+  (let [ctx (.ctx cv)
+        d (primitive/cast (ptr f64) (dashes))]
+    (set-stroke! cv c)
+    (CGContextSetLineWidth ctx 1.0)
+    (if dashed
+        (do
+          (set! (primitive/index d 0) 3.0)
+          (set! (primitive/index d 1) 4.0)
+          (CGContextSetLineDash ctx 0.0 d 2))
+        (CGContextSetLineDash ctx 0.0 (primitive/cast (ptr f64) 0) 0))
+    (CGContextBeginPath ctx)))
+
+;; Segments are stroked on a half-pixel so a one-pixel line lands on one row.
+(defn seg! [(cv (ptr Canvas)) (x1 f64) (y1 f64) (x2 f64) (y2 f64)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (CGContextMoveToPoint ctx (+ x1 0.5) (+ (flip-y cv y1 0.0) 0.5))
+    (CGContextAddLineToPoint ctx (+ x2 0.5) (+ (flip-y cv y2 0.0) 0.5))))
+
+(defn end-path! [(cv (ptr Canvas))] (-> i64)
+  (CGContextStrokePath (.ctx cv)))
+
+(defn clip-push! [(cv (ptr Canvas)) (x f64) (y f64) (w f64) (h f64)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (CGContextSaveGState ctx)
+    (CGContextClipToRect ctx (cg-rect x (flip-y cv y h) w h))))
+
+(defn clip-pop! [(cv (ptr Canvas))] (-> i64)
+  (CGContextRestoreGState (.ctx cv)))
+
+;; Draw at an explicit baseline. Returns the advance so callers can chain runs.
+(defn text-tracked! [(cv (ptr Canvas))
+                     (face (ptr Face))
+                     (x f64)
+                     (baseline f64)
+                     (c Color)
+                     (text (slice u8))
+                     (extra f64)] (-> f64)
+  (let [count (to-utf16 text)
+        font (.font face)
+        adv (+ (.adv face) extra)
+        u (primitive/cast (ptr u16) (units))
+        g (primitive/cast (ptr u16) (glyphs))
+        p (primitive/cast (ptr CGPoint) (spots))
+        y (flip-y cv baseline 0.0)
+        (mut i) 0]
+    (CTFontGetGlyphsForCharacters font u g count)
+    (loop (if (>= (load i) count)
+              (break)
+              (let [slot (primitive/index p (load i))]
+                (set! (.x slot) (+ x (* adv (primitive/cast f64 (load i)))))
+                (set! (.y slot) y)
+                (set! i (+ (load i) 1)))))
+    (set-fill! cv c)
+    (CTFontDrawGlyphs font g p count (.ctx cv))
+    (* adv (primitive/cast f64 count))))
+
+(defn text-at! [(cv (ptr Canvas)) (face (ptr Face)) (x f64) (baseline f64) (c Color) (text (slice u8))] (-> f64)
+  (text-tracked! cv face x baseline c text 0.0))
+
+;; Baseline for text vertically centred in a row of `h` starting at `top`.
+(defn row-baseline [(face (ptr Face)) (top f64) (h f64)] (-> f64)
+  (let [ascent (.ascent face)
+        descent (.descent face)]
+    (+ top (+ (/ (- h (+ ascent descent)) 2.0) ascent))))
+
+(defn text-row! [(cv (ptr Canvas)) (face (ptr Face)) (x f64) (top f64) (h f64) (c Color) (text (slice u8))] (-> f64)
+  (text-at! cv face x (row-baseline face top h) c text))
+
+;; The byte offset that ends the longest prefix of `text` fitting `cells`
+;; characters. UTF-8 aware, so an elided label never cuts a glyph in half.
+(defn prefix-bytes [(text (slice u8)) (cells i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) 0
+        (mut seen) 0]
+    (loop (if (or (>= (load i) n) (>= (load seen) cells))
+              (break)
+              (let [b (primitive/cast i64 (slice-get [u8] text (load i)))
+                    width (cond (< b 0x80) 1 (< b 0xE0) 2 (< b 0xF0) 3 :else 4)]
+                (set! i (+ (load i) width))
+                (set! seen (+ (load seen) 1)))))
+    (load i)))
+
+;; Draw `text` inside `max-w`, ending in an ellipsis when it does not fit.
+;; Nothing in this interface is ever cut off by the edge of a pane.
+(defn text-elided! [(cv (ptr Canvas))
+                    (face (ptr Face))
+                    (x f64)
+                    (top f64)
+                    (h f64)
+                    (max-w f64)
+                    (c Color)
+                    (text (slice u8))] (-> f64)
+  (let [adv (.adv face)
+        room (primitive/cast i64 (/ max-w adv))
+        cells (text-cells text)]
+    (if (<= cells room)
+        (text-row! cv face x top h c text)
+        (if (< room 2)
+            0.0
+            (let [keep (prefix-bytes text (- room 1))
+                  shown (subslice [u8] text 0 keep)
+                  w (text-row! cv face x top h c shown)]
+              (+ w (text-row! cv face (+ x w) top h c "…")))))))

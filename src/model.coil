@@ -1,0 +1,478 @@
+;; Application state.
+;;
+;; One workflow is a list of steps plus the conversation that produced them, and
+;; those are the same object: talking is how the graph changes. Layout is derived
+;; from the dependencies rather than stored, so a step added mid-conversation
+;; lands in the right column without anyone placing it.
+(module coilgui.model)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+(defsum State (SQueued []) (SRunning []) (SDone []) (SFailed []) (SAsks []))
+
+(defstruct Step
+  [(name (slice u8))
+   (state State)
+   (machine (slice u8))
+   (secs i64)
+   (detail (slice u8))
+   (from i64)
+   (join i64)
+   (col i64)
+   (row i64)])
+
+(defsum Speaker (You []) (Agent []) (Cont []) (Tool []) (Result []) (Pending []) (Asks []))
+
+(defstruct Line [(who Speaker) (text (slice u8)) (trail (slice u8))])
+
+(defstruct Item
+  [(project (slice u8))
+   (name (slice u8))
+   (state State)
+   (meta (slice u8))
+   (head bool)])
+
+(defsum Scene (SceneNew []) (ScenePlan []) (SceneRunning []) (SceneAsks []) (SceneDone []))
+
+(defstruct App
+  [(alc (ptr Allocator))
+   (scene Scene)
+   (title (slice u8))
+   (items (ArrayList Item))
+   (steps (ArrayList Step))
+   (lines (ArrayList Line))
+   (input (ArrayList u8))
+   (selected i64)
+   (focus i64)
+   (tick i64)
+   (running bool)])
+
+(defn state-word [(s State)] (-> (slice u8))
+  (match s
+    (SQueued [] "queued")
+    (SRunning [] "running")
+    (SDone [] "done")
+    (SFailed [] "failed")
+    (SAsks [] "asks")))
+
+(defn mk-step [(name (slice u8)) (from i64) (join i64) (st State) (machine (slice u8)) (secs i64)] (-> Step)
+  (let [s (alloc/stack Step)]
+    (set! (.name s) name)
+    (set! (.state s) st)
+    (set! (.machine s) machine)
+    (set! (.secs s) secs)
+    (set! (.detail s) "")
+    (set! (.from s) from)
+    (set! (.join s) join)
+    (set! (.col s) 0)
+    (set! (.row s) 0)
+    (load s)))
+
+(defn mk-line [(who Speaker) (text (slice u8)) (trail (slice u8))] (-> Line)
+  (let [l (alloc/stack Line)]
+    (set! (.who l) who)
+    (set! (.text l) text)
+    (set! (.trail l) trail)
+    (load l)))
+
+(defn mk-item [(project (slice u8)) (name (slice u8)) (st State) (meta (slice u8)) (head bool)] (-> Item)
+  (let [i (alloc/stack Item)]
+    (set! (.project i) project)
+    (set! (.name i) name)
+    (set! (.state i) st)
+    (set! (.meta i) meta)
+    (set! (.head i) head)
+    (load i)))
+
+;; Column is dependency depth; row is arrival order within a column. Called after
+;; any change to the step list, so the graph is never stale with respect to it.
+(defn relayout! [(app (ptr App))] (-> i64)
+  (let [n (al-len [Step] (.steps app))
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [s (al-elem [Step] (field app steps) (load i))
+                    from (.from s)
+                    join (.join s)
+                    base
+                      (if (< from 0)
+                          0
+                          (+ 1 (.col (al-elem [Step] (field app steps) from))))
+                    depth
+                      (if (< join 0)
+                          base
+                          (let [jc
+                                  (+ 1
+                                     (.col (al-elem [Step] (field app steps) join)))]
+                            (if (> jc base) jc base)))
+                    (mut used) 0
+                    (mut k) 0]
+                (loop (if (>= (load k) (load i))
+                          (break)
+                          (do
+                            (when (= (load (field (al-elem [Step]
+                                                           (field app steps)
+                                                           (load k))
+                                                  col))
+                                     depth)
+                              (store! used (+ (load used) 1))
+                              0)
+                            (set! k (+ (load k) 1)))))
+                (set! (.col s) depth)
+                (set! (.row s) (load used))
+                (set! i (+ (load i) 1)))))
+    0))
+
+(defn steps-clear! [(app (ptr App))] (-> i64)
+  (set! (.steps app) (al-new [Step] (.alc app)))
+  0)
+
+(defn lines-clear! [(app (ptr App))] (-> i64)
+  (set! (.lines app) (al-new [Line] (.alc app)))
+  0)
+
+(defn push-step! [(app (ptr App)) (s Step)] (-> i64)
+  (al-push! [Step] (field app steps) s)
+  (relayout! app)
+  0)
+
+(defn push-line! [(app (ptr App)) (l Line)] (-> i64)
+  (al-push! [Line] (field app lines) l)
+  0)
+
+(defn step-count [(app (ptr App))] (-> i64)
+  (al-len [Step] (.steps app)))
+
+(defn step-at [(app (ptr App)) (i i64)] (-> (ptr Step))
+  (al-elem [Step] (field app steps) i))
+
+(defn count-in-state [(app (ptr App)) (want (slice u8))] (-> i64)
+  (let [n (step-count app)
+        (mut i) 0
+        (mut found) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (= (state-word (load (field (step-at app (load i)) state))) want)
+                  (store! found (+ (load found) 1))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn rail-fixture! [(app (ptr App))] (-> i64)
+  (let [items (al-new [Item] (.alc app))]
+    (set! (.items app) items)
+    (al-push! [Item] (field app items) (mk-item "harness" "" (SQueued) "" true))
+    (al-push! [Item] (field app items) (mk-item "harness" "arena migration" (SQueued) "" false))
+    (al-push! [Item] (field app items) (mk-item "harness" "snake · factory" (SRunning) "2/5" false))
+    (al-push! [Item] (field app items) (mk-item "harness" "json arena" (SRunning) "3" false))
+    (al-push! [Item] (field app items) (mk-item "harness" "provider audit" (SDone) "" false))
+    (al-push! [Item] (field app items) (mk-item "jim-editor" "" (SQueued) "" true))
+    (al-push! [Item] (field app items) (mk-item "jim-editor" "widget rewrite" (SFailed) "1/3" false))
+    (al-push! [Item] (field app items) (mk-item "jim-editor" "nightly bench" (SQueued) "queued" false))
+    0))
+
+(defn rail-retitle! [(app (ptr App)) (name (slice u8))] (-> i64)
+  (set! (.name (al-elem [Item] (field app items) 1)) name)
+  0)
+
+;; Has anything in this workflow actually run? Before that, the right pane is the
+;; plan conversation rather than any one step's transcript.
+(defn started? [(app (ptr App))] (-> bool)
+  (> (+ (count-in-state app "running")
+        (+ (count-in-state app "done")
+           (+ (count-in-state app "failed") (count-in-state app "asks"))))
+     0))
+
+;; The rail row for the open workflow reports its aggregate: the worst thing
+;; that needs a person, then whatever is still moving.
+(defn rail-sync! [(app (ptr App))] (-> i64)
+  (let [it (al-elem [Item] (field app items) 1)
+        n (step-count app)
+        done (count-in-state app "done")
+        asks (count-in-state app "asks")
+        failed (count-in-state app "failed")
+        running (count-in-state app "running")]
+    (set! (.name it) (.title app))
+    (set! (.state it)
+          (if (> asks 0)
+              (SAsks)
+              (if (> failed 0)
+                  (SFailed)
+                  (if (> running 0) (SRunning) (if (and (> n 0) (= done n)) (SDone) (SQueued))))))
+    0))
+
+(defn app-init! [(app (ptr App)) (a (ptr Allocator))] (-> i64)
+  (set! (.alc app) a)
+  (set! (.scene app) (SceneNew))
+  (set! (.title app) "untitled")
+  (set! (.input app) (al-new [u8] a))
+  (set! (.selected app) 1)
+  (set! (.focus app) 0)
+  (set! (.tick app) 0)
+  (set! (.running app) false)
+  (steps-clear! app)
+  (lines-clear! app)
+  (rail-fixture! app)
+  0)
+
+;; The plan the scripted planner proposes on the first message. A real provider
+;; call replaces this function and nothing else; everything downstream already
+;; works from the step list.
+(defn propose-plan! [(app (ptr App))] (-> i64)
+  (steps-clear! app)
+  (push-step! app (mk-step "read" -1 -1 (SQueued) "" 0))
+  (push-step! app (mk-step "port writer" 0 -1 (SQueued) "" 0))
+  (push-step! app (mk-step "port reader" 0 -1 (SQueued) "cirrus" 0))
+  (push-step! app (mk-step "test" 1 2 (SQueued) "" 0))
+  (set! (.title app) "arena migration")
+  0)
+
+(defn find-step [(app (ptr App)) (name (slice u8))] (-> i64)
+  (let [n (step-count app)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (match (str-find (.name (step-at app (load i))) name)
+                  (Some [_] (set! found (load i)))
+                  (None [] 0))
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn drop-step! [(app (ptr App)) (at i64)] (-> i64)
+  (let [n (step-count app)
+        (mut kept) (al-new [Step] (.alc app))
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (!= (load i) at)
+                  (let [s (load (step-at app (load i)))
+                        f (.from s)
+                        j (.join s)
+                        fixed
+                          (mk-step (.name s)
+                                   (if (= f at) -1 (if (> f at) (- f 1) f))
+                                   (if (= j at) -1 (if (> j at) (- j 1) j))
+                                   (.state s)
+                                   (.machine s)
+                                   (.secs s))]
+                    (al-push! [Step] (mut kept) fixed))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (set! (.steps app) (load kept))
+    (relayout! app)
+    0))
+
+;; ---------------------------------------------------------------- text
+
+;; A copy owned by the app's allocator. The composer's buffer is reused, so a
+;; line that keeps pointing at it would change under the transcript.
+(defn own-str [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)]
+    (if (= n 0)
+        ""
+        (let [p (unwrap-ptr [u8] (alloc-slice [u8] a n))
+              (mut i) 0]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (do
+                      (set! (primitive/index p (load i)) (slice-get [u8] s (load i)))
+                      (set! i (+ (load i) 1)))))
+          (slice-new [u8] p n)))))
+
+;; Wrap on spaces at `width` characters, first line marked, the rest continuations.
+(defn push-wrapped! [(app (ptr App)) (who Speaker) (text (slice u8)) (width i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut start) 0
+        (mut first) true]
+    (loop (if (>= (load start) n)
+              (break)
+              (let [remaining (- n (load start))
+                    take (if (<= remaining width) remaining width)
+                    (mut cut) (+ (load start) take)]
+                (when (< (load cut) n)
+                  (loop (if (or (<= (load cut) (load start))
+                                (= (primitive/cast i64 (slice-get [u8] text (load cut))) 32))
+                            (break)
+                            (store! cut (- (load cut) 1))))
+                  (when (<= (load cut) (load start))
+                    (store! cut (+ (load start) take))
+                    0)
+                  0)
+                (push-line! app
+                            (mk-line (if (load first) who (Cont))
+                                     (subslice [u8] text (load start) (load cut))
+                                     ""))
+                (set! first false)
+                (set! start
+                      (if (and (< (load cut) n)
+                               (= (primitive/cast i64 (slice-get [u8] text (load cut))) 32))
+                          (+ (load cut) 1)
+                          (load cut))))))
+    0))
+
+(defn input-slice [(app (ptr App))] (-> (slice u8))
+  (al-slice [u8] (.input app)))
+
+(defn input-clear! [(app (ptr App))] (-> i64)
+  (set! (.input app) (al-new [u8] (.alc app)))
+  0)
+
+(defn input-push! [(app (ptr App)) (b u8)] (-> i64)
+  (al-push! [u8] (field app input) b)
+  0)
+
+(defn input-backspace! [(app (ptr App))] (-> i64)
+  (al-pop! [u8] (field app input))
+  0)
+
+;; The words after `prefix`, bounded, or "" when the prefix is absent.
+(defn word-after [(text (slice u8)) (prefix (slice u8))] (-> (slice u8))
+  (match (str-find text prefix)
+    (Some [at]
+          (let [start (+ at (slice-len [u8] prefix))
+                n (slice-len [u8] text)
+                stop (if (> (- n start) 18) (+ start 18) n)]
+            (str-trim (subslice [u8] text start stop))))
+    (None [] "")))
+
+;; A short name for a new workflow, taken from the request itself.
+;; A short name for a new workflow, taken from the request itself and cut on a
+;; word boundary rather than mid-word.
+(defn short-name [(text (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] text)]
+    (if (<= n 18)
+        (str-trim text)
+        (let [(mut cut) 18]
+          (loop (if (or (<= (load cut) 4)
+                        (= (primitive/cast i64 (slice-get [u8] text (load cut))) 32))
+                    (break)
+                    (set! cut (- (load cut) 1))))
+          (str-trim (subslice [u8] text 0 (load cut)))))))
+
+;; ---------------------------------------------------------------- the planner
+;;
+;; The seam. Everything downstream works from the step list, so a real model call
+;; replaces this one function and nothing else changes. It deliberately answers
+;; from the text rather than from a fixed script, so the graph visibly follows
+;; the conversation.
+(defn planner-respond! [(app (ptr App)) (text (slice u8))] (-> i64)
+  (let [a (.alc app)
+        dropped (word-after text "drop ")
+        added (word-after text "add ")]
+    (if (= (step-count app) 0)
+        (let [subject (own-str a (short-name text))]
+          (steps-clear! app)
+          (push-step! app (mk-step "read" -1 -1 (SQueued) "" 0))
+          (push-step! app (mk-step subject 0 -1 (SQueued) "" 0))
+          (push-step! app (mk-step "test" 1 -1 (SQueued) "" 0))
+          (set! (.title app) subject)
+          (push-wrapped! app
+                         (Agent)
+                         "Three steps: read what is there, do the work, then test it. Say drop <step> or add <step> to change the shape, or run it."
+                         52)
+          0)
+        (cond (> (slice-len [u8] dropped) 0)
+                (let [at (find-step app dropped)]
+                  (if (< at 0)
+                      (push-wrapped! app (Agent) "There is no step by that name." 52)
+                      (do
+                        (drop-step! app at)
+                        (push-wrapped! app
+                                       (Agent)
+                                       "Dropped it. The steps after it now depend on what it depended on."
+                                       52))))
+              (> (slice-len [u8] added) 0)
+                (do
+                  (push-step! app (mk-step (own-str a added) (- (step-count app) 1) -1 (SQueued) "" 0))
+                  (push-wrapped! app (Agent) "Added, at the end. Say add <step> again to keep going." 52))
+              :else (push-wrapped! app (Agent) "Noted. The plan is unchanged." 52)))))
+
+;; ---------------------------------------------------------------- running
+
+(defn deps-done? [(app (ptr App)) (s (ptr Step))] (-> bool)
+  (let [from (.from s)
+        join (.join s)
+        ok1
+          (or (< from 0)
+              (= (state-word (.state (step-at app from))) "done"))
+        ok2
+          (or (< join 0)
+              (= (state-word (.state (step-at app join))) "done"))]
+    (and ok1 ok2)))
+
+(defn first-in-state [(app (ptr App)) (want (slice u8))] (-> i64)
+  (let [n (step-count app)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (state-word (load (field (step-at app (load i)) state))) want)
+                  (store! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; One transition per call: finish what is running, or start what is ready. A
+;; step on another machine stops to ask the first time it comes up.
+(defn advance! [(app (ptr App))] (-> i64)
+  (let [running (first-in-state app "running")
+        asking (first-in-state app "asks")]
+    (cond (>= asking 0) 0
+          (>= running 0)
+            (let [s (step-at app running)
+                  remote (> (slice-len [u8] (.machine s)) 0)]
+              (if (and remote (< (.secs s) 90))
+                  (do
+                    (store! (field s state) (SAsks))
+                    (store! (field app focus) running)
+                    (push-line! app (mk-line (Agent) "This step runs on another machine and changes a" ""))
+                    (push-line! app (mk-line (Cont) "public signature." ""))
+                    (push-line! app (mk-line (Asks) "approve, or say what to do instead" ""))
+                    0)
+                  (do
+                    (store! (field s state) (SDone))
+                    (push-line! app (mk-line (Result) "done" ""))
+                    0)))
+          :else
+            (let [n (step-count app)
+                  (mut i) 0
+                  (mut started) false]
+              (loop (if (or (>= (load i) n) (load started))
+                        (break)
+                        (let [s (step-at app (load i))]
+                          (when (and (= (state-word (.state s)) "queued")
+                                     (deps-done? app s))
+                            (store! (field s state) (SRunning))
+                            (store! (field app focus) (load i))
+                            (push-line! app (mk-line (Tool) (.name s) ""))
+                            (store! started true)
+                            0)
+                          (store! i (+ (load i) 1)))))
+              (when (not (load started))
+                (store! (field app running) false)
+                0)
+              0))))
+
+(defn run-start! [(app (ptr App))] (-> i64)
+  (set! (.running app) true)
+  (lines-clear! app)
+  (advance! app)
+  0)
+
+;; Elapsed only ticks for the step that is actually running.
+(defn tick! [(app (ptr App))] (-> i64)
+  (let [running (first-in-state app "running")]
+    (when (>= running 0)
+      (let [s (step-at app running)]
+        (store! (field s secs) (+ (.secs s) 1))
+        0))
+    0))

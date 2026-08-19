@@ -1,0 +1,89 @@
+;; The state marks, drawn rather than typed.
+;;
+;; A terminal has to spell these with whatever glyphs the font happens to carry.
+;; A window does not, so every mark here is geometry on the same baseline grid as
+;; the text: crisper, aligned to the pixel, and independent of the typeface.
+(module coilgui.marks)
+
+(import "coil.primitive" :as primitive)
+(import "coilgui.ffi" :use *)
+(import "coilgui.theme" :use *)
+(import "coilgui.draw" :use *)
+
+(defn stroke-of! [(cv (ptr Canvas)) (c Color) (width f64)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (set-stroke! cv c)
+    (CGContextSetLineWidth ctx width)
+    (CGContextSetLineDash ctx 0.0 (primitive/cast (ptr f64) 0) 0)
+    (CGContextSetLineCap ctx 1)
+    (CGContextBeginPath ctx)))
+
+(defn to! [(cv (ptr Canvas)) (x1 f64) (y1 f64) (x2 f64) (y2 f64)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (CGContextMoveToPoint ctx x1 (flip-y cv y1 0.0))
+    (CGContextAddLineToPoint ctx x2 (flip-y cv y2 0.0))))
+
+(defn done! [(cv (ptr Canvas))] (-> i64)
+  (CGContextStrokePath (.ctx cv)))
+
+;; A filled disc. The assistant's bullet, and the marker on a rail row.
+(defn dot! [(cv (ptr Canvas)) (cx f64) (cy f64) (r f64) (c Color)] (-> i64)
+  (set-fill! cv c)
+  (CGContextFillEllipseInRect (.ctx cv)
+                              (cg-rect (- cx r) (flip-y cv (+ cy r) 0.0) (* r 2.0) (* r 2.0))))
+
+;; An open ring: running. The one mark that means work is happening now.
+(defn ring! [(cv (ptr Canvas)) (cx f64) (cy f64) (r f64) (c Color)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (set-stroke! cv c)
+    (CGContextSetLineWidth ctx 1.5)
+    (CGContextSetLineDash ctx 0.0 (primitive/cast (ptr f64) 0) 0)
+    (CGContextStrokeEllipseInRect ctx (cg-rect (- cx r) (flip-y cv (+ cy r) 0.0) (* r 2.0) (* r 2.0)))))
+
+(defn check! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
+  (stroke-of! cv c 1.4)
+  (to! cv (- cx 3.5) cy (- cx 1.0) (+ cy 2.8))
+  (to! cv (- cx 1.0) (+ cy 2.8) (+ cx 3.8) (- cy 3.2))
+  (done! cv))
+
+(defn cross! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
+  (stroke-of! cv c 1.4)
+  (to! cv (- cx 3.2) (- cy 3.2) (+ cx 3.2) (+ cy 3.2))
+  (to! cv (+ cx 3.2) (- cy 3.2) (- cx 3.2) (+ cy 3.2))
+  (done! cv))
+
+;; The prompt chevron. It marks where typing goes, in the composer and in a list.
+(defn caret! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
+  (stroke-of! cv c 1.5)
+  (to! cv (- cx 2.2) (- cy 3.6) (+ cx 2.2) cy)
+  (to! cv (+ cx 2.2) cy (- cx 2.2) (+ cy 3.6))
+  (done! cv))
+
+;; A solid right-pointing triangle: the browsing cursor, distinct from the caret
+;; because they can be in two different places at once.
+(defn cursor! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
+  (let [ctx (.ctx cv)]
+    (set-fill! cv c)
+    (CGContextBeginPath ctx)
+    (CGContextMoveToPoint ctx (- cx 2.4) (flip-y cv (- cy 3.4) 0.0))
+    (CGContextAddLineToPoint ctx (+ cx 3.0) (flip-y cv cy 0.0))
+    (CGContextAddLineToPoint ctx (- cx 2.4) (flip-y cv (+ cy 3.4) 0.0))
+    (CGContextFillPath ctx)))
+
+;; The elbow under a tool call, where its result hangs.
+(defn elbow! [(cv (ptr Canvas)) (x f64) (y f64) (c Color)] (-> i64)
+  (stroke-of! cv c 1.0)
+  (to! cv x (- y 6.0) x (+ y 1.0))
+  (to! cv x (+ y 1.0) (+ x 5.0) (+ y 1.0))
+  (done! cv))
+
+;; The machine tag's lead-in: a two-segment hop, for a step running elsewhere.
+(defn hop! [(cv (ptr Canvas)) (x f64) (y f64) (c Color)] (-> i64)
+  (stroke-of! cv c 1.0)
+  (to! cv x y (+ x 2.5) y)
+  (to! cv (+ x 4.5) y (+ x 7.0) y)
+  (done! cv))
+
+;; A small dot for queued: present, not yet anything.
+(defn pending! [(cv (ptr Canvas)) (cx f64) (cy f64) (c Color)] (-> i64)
+  (dot! cv cx cy 1.5 c))

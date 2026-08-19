@@ -1,0 +1,4 @@
+.coil/
+builds/
+*.o
+*.png
