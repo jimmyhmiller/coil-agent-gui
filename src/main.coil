@@ -560,12 +560,12 @@
 ;; The real thing, headless: discover the harness on disk, open a workflow, and
 ;; render it. Same code path as the window, so what this writes is what the
 ;; window shows.
-(defn render-real [(which i64)] (-> i64)
+(defn render-real [(which i64) (w f64) (h f64)] (-> i64)
   (let [a (malloc-allocator)
         app (alloc/stack App)
         cv (alloc/stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
-        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        ctx (CGBitmapContextCreate (nil-ptr) (cast i64 (* w 2.0)) (cast i64 (* h 2.0)) 8 0 space 1)
         root (harness-root a)
         (mut flows) (harness/discover a root "harness")
         n (al-len [harness/Workflow] (load flows))]
@@ -587,10 +587,10 @@
                         (set! i (+ (load i) 1))))))
           (set! (.selected app) (+ which 1))
           (open-workflow! app (mut flows) which)
-          (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
+          (if (= (canvas-init cv ctx h 2.0) 1)
               (do (println "fonts failed to load") 1)
               (do
-                (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
+                (draw-app! cv app w h)
                 (write-png ctx c"real.png")
                 (println "wrote real.png · {d} steps · {d} lines"
                          (step-count app)
@@ -663,7 +663,19 @@
           (demo)
           (if (and (> (primitive/cast i64 argc) 1)
                    (= (cstr->str (load (primitive/index argv 1))) "--real"))
-              (render-real 0)
+              (render-real 0
+                           (if (> (cast i64 argc) 2)
+                               (cast f64
+                                     (match (str-parse-int (cstr->str (load (index argv 2))))
+                                       (Some [v] v)
+                                       (None [] WIDTH)))
+                               (cast f64 WIDTH))
+                           (if (> (cast i64 argc) 3)
+                               (cast f64
+                                     (match (str-parse-int (cstr->str (load (index argv 3))))
+                                       (Some [v] v)
+                                       (None [] HEIGHT)))
+                               (cast f64 HEIGHT)))
               (if (and (> (primitive/cast i64 argc) 1)
                        (= (cstr->str (load (primitive/index argv 1))) "--spawn-test"))
                   (spawn-test)

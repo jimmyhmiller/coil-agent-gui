@@ -392,14 +392,17 @@
             (if empty
                 ;; The placeholder starts past the cursor rather than under it.
                 (do
-                  (text-elided! cv (field cv f13) (+ base 36.0) top 52.0 (- w 220.0) (line) placeholder)
+                  (text-elided! cv (field cv f13) (+ base 36.0) top 52.0 (- w 240.0) (line) placeholder)
                   0.0)
                 (text-elided! cv (field cv f13) (+ base 18.0) top 52.0 (- w 200.0) (ink1) text))]
       ;; The cursor does not blink. It is a position, not an alarm: a blinking
       ;; block is movement the user did not cause, in the one place they are
       ;; already looking.
       (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber)))
-    (when (> (slice-len [u8] hint) 0)
+    ;; The hint is the first thing to go when the pane is narrow: it is a
+    ;; reminder, and the thing you are typing is not.
+    (when (and (> (slice-len [u8] hint) 0)
+               (> w (+ 260.0 (text-width (field cv f11) hint))))
       (text-row! cv
                  (field cv f11)
                  (text-right (field cv f11) (- (+ x w) GUTTER_PANE) hint)
