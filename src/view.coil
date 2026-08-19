@@ -161,10 +161,12 @@
                   (focused bool)
                   (hot bool)
                   (now f64)] (-> i64)
-  (let [arrive (ease-out (phase now (.born s) ANIM_STEP))
-        settle (phase now (.changed s) ANIM_STEP)
+  ;; No entrance animation. A node that is merely being shown must not move or
+  ;; fade: reading is not an event. Only a state change is worth marking, and it
+  ;; is marked in place.
+  (let [settle (phase now (.changed s) ANIM_STEP)
         x (node-x x0 (.col s))
-        y (- (node-y y0 (.row s)) (* 6.0 (- 1.0 arrive)))
+        y (node-y y0 (.row s))
         st (.state s)
         machine (.machine s)
         resting
@@ -176,7 +178,6 @@
         ;; ease-out(1) is exactly 1, so a settled node mixes to its resting
         ;; colour and no branch is needed.
         border (mix (amber) resting (ease-out settle))]
-    (canvas-alpha! cv arrive)
     (when hot (fill! cv x y NODE_W NODE_H (hover-wash)) 0)
     (box! cv x y NODE_W NODE_H border)
     (text-elided! cv
@@ -192,7 +193,6 @@
       (hop! cv (+ x 12.0) (+ y (+ NODE_H 12.0)) (ink3))
       (text-at! cv (field cv f11) (+ x 24.0) (+ y (+ NODE_H 16.0)) (ink3) machine)
       0)
-    (canvas-alpha! cv 1.0)
     0))
 
 (defn max-row [(app (ptr App))] (-> i64)
@@ -314,13 +314,11 @@
   v)
 
 (defn draw-line! [(cv (ptr Canvas)) (app (ptr App)) (l (ptr Line)) (x f64) (w f64) (top-in f64)] (-> f64)
-  (let [arrive (ease-out (phase (.now app) (.born l) ANIM_FAST))
-        top (- top-in (* 4.0 (- 1.0 arrive)))
+  (let [top top-in
         text (.text l)
         trail (.trail l)
         body-x (+ x 20.0)
         room (- (- w 40.0) 20.0)]
-    (canvas-alpha! cv arrive)
     (draw-line-reset! cv
                       (match (.who l)
                         (You []
@@ -425,6 +423,7 @@
   (let [n (al-len [Line] (.lines app))
         top (+ HEADER 22.0)
         bottom (- h 66.0)
+        room (- bottom top)
         (mut total) 0.0
         (mut i) 0]
     (loop (if (>= (load i) n)
@@ -438,7 +437,16 @@
                             (_ false)))]
                 (set! total (+ (load total) (+ (line-height l) (if follows 0.0 8.0))))
                 (set! i (+ (load i) 1)))))
-    (let [(mut y) (if (< (load total) (- bottom top)) top (- bottom (load total)))]
+    ;; Publish how far back there is to go, so the wheel has something to clamp
+    ;; against, and clamp the current position in case the content shrank.
+    (set! (.scroll-max app) (if (> (load total) room) (- (load total) room) 0.0))
+    (when (> (.scroll app) (.scroll-max app))
+      (set! (.scroll app) (.scroll-max app))
+      0)
+    (let [(mut y)
+            (if (< (load total) room)
+                top
+                (+ (- bottom (load total)) (.scroll app)))]
       (clip-push! cv x HEADER w (- (- h HEADER) 52.0))
       (set! i 0)
       (loop (if (>= (load i) n)
@@ -453,7 +461,21 @@
                               (_ false)))]
                   (set! y (if follows next (+ next 8.0)))
                   (set! i (+ (load i) 1)))))
-      (clip-pop! cv))
+      (clip-pop! cv)
+      ;; A hairline gutter mark, only while there is history above to reach.
+      (when (> (.scroll-max app) 0.0)
+        (let [track (- bottom top)
+              ;; The thumb's length is the visible share of the whole
+              ;; conversation, and its position is how far back you are.
+              thumb
+                (let [share (/ room (load total))
+                      size (* track share)]
+                  (if (< size 24.0) 24.0 size))
+              travel (- track thumb)
+              back (/ (.scroll app) (.scroll-max app))]
+          (fill! cv (- (+ x w) 3.0) (+ top (* travel (- 1.0 back))) 2.0 thumb (line))
+          0))
+      0)
     (draw-composer! cv
                     app
                     x
@@ -579,7 +601,7 @@
                top
                22.0
                (ink3)
-               "describe what should happen. steps appear as you talk.")
+               "describe what should happen. this writes a workflow you can run.")
     (caret! cv (+ left 5.0) (+ top 62.0) (amber))
     (let [tw
             (text-elided! cv

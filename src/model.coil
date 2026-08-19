@@ -65,7 +65,12 @@
    (journal (slice u8))
    (factory (slice u8))
    ;; Index of the workflow whose journal is loaded, or -1.
-   (open i64)])
+   (open i64)
+   ;; How far back from the end of the conversation the view is scrolled, in
+   ;; points. Zero means pinned to the latest line, which is where a live run
+   ;; wants to be.
+   (scroll f64)
+   (scroll-max f64)])
 
 (defn state-word [(s State)] (-> (slice u8))
   (match s
@@ -271,6 +276,8 @@
   (set! (.journal app) "")
   (set! (.factory app) "")
   (set! (.open app) -1)
+  (set! (.scroll app) 0.0)
+  (set! (.scroll-max app) 0.0)
   (steps-clear! app)
   (lines-clear! app)
   (rail-fixture! app)
@@ -533,3 +540,17 @@
         (store! (field s secs) (+ (.secs s) 1))
         0))
     0))
+
+;; Scrolling is clamped to the content, and clamping needs the content height,
+;; which only the view knows. It publishes the limit; this moves within it.
+(defn scroll-by! [(app (ptr App)) (delta f64)] (-> i64)
+  (let [next (+ (.scroll app) delta)]
+    (set! (.scroll app)
+          (if (< next 0.0)
+              0.0
+              (if (> next (.scroll-max app)) (.scroll-max app) next)))
+    0))
+
+(defn scroll-reset! [(app (ptr App))] (-> i64)
+  (set! (.scroll app) 0.0)
+  0)

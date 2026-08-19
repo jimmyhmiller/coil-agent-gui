@@ -173,26 +173,66 @@
 
 ;; ---------------------------------------------------------------- interaction
 
-(defn send! [(app (ptr App))] (-> i64)
+(defn send! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow)))] (-> i64)
   (let [a (.alc app)
         text (own-str a (input-slice app))]
     (if (= (slice-len [u8] text) 0)
         0
-        (let [asking (first-in-state app "asks")]
+        (do
           (push-wrapped! app (You) text 52)
           (input-clear! app)
-          (if (>= asking 0)
+          (if (> (step-count app) 0)
+              ;; There is nothing to say to a run that is already recorded. The
+              ;; harness has no way to deliver a message into a live one either —
+              ;; its only intervention is cancel — so this says so rather than
+              ;; pretending the message went somewhere.
               (do
-                (set! (.state (step-at app asking)) (SRunning))
-                (push-wrapped! app (Agent) "Approved. Carrying on from where it stopped." 52)
-                (set! (.running app) true)
+                (push-wrapped! app
+                               (Agent)
+                               "This is a recorded run, so there is nobody to answer. Press ⌘N and describe what you want to happen next; that writes a workflow you can run."
+                               52)
                 0)
-              (planner-respond! app text))
-          (rail-sync! app)
-          0))))
+              ;; An empty conversation authors a real factory: a manifest and a
+              ;; worker, in the harness, exactly as a person would write them.
+              (let [root (harness-root a)
+                    folder (harness/create-workflow! a root text)]
+                (if (= (slice-len [u8] folder) 0)
+                    (do
+                      (push-wrapped! app (Agent) "I could not write that workflow to disk." 52)
+                      0)
+                    (do
+                      (set! flows (harness/discover a root "harness"))
+                      (rail-build! app (mut flows))
+                      (let [n (al-len [harness/Workflow] (load flows))
+                            (mut found) -1
+                            (mut i) 0]
+                        (loop (if (or (>= (load i) n) (>= (load found) 0))
+                                  (break)
+                                  (do
+                                    (when (= (.folder (al-elem [harness/Workflow] flows (load i))) folder)
+                                      (set! found (load i))
+                                      0)
+                                    (set! i (+ (load i) 1)))))
+                        (when (>= (load found) 0)
+                          (open-workflow! app flows (load found))
+                          (let [(mut row) 0
+                                items (al-len [Item] (.items app))]
+                            (loop (if (>= (load row) items)
+                                      (break)
+                                      (do
+                                        (when (= (.source (al-elem [Item] (field app items) (load row))) (load found))
+                                          (set! (.selected app) (load row))
+                                          0)
+                                        (set! row (+ (load row) 1))))))
+                          0)
+                        0)
+                      (push-wrapped! app
+                                     (Agent)
+                                     (join2 "Wrote the workflow to " folder)
+                                     52)
+                      (push-wrapped! app (Agent) "One step, queued. Run it when you are ready." 52)
+                      0))))))))
 
-;; Where the harness lives. One environment variable so this is not wired to my
-;; machine, and a sibling checkout by default.
 (defn harness-root [(a (ptr Allocator))] (-> (slice u8))
   (match (os/env-get a "COIL_HARNESS_ROOT")
     (Ok [found]
@@ -240,6 +280,7 @@
   (when (and (>= at 0) (< at (al-len [harness/Workflow] (load flows))))
     (harness/load-into! app (al-elem [harness/Workflow] flows at))
     (set! (.open app) at)
+    (scroll-reset! app)
     (set! (.focus app) 0)
     (harness/rebuild-lines! app)
     0)
@@ -326,7 +367,7 @@
         (msg (ptr i8) cursor (objc-sel c"set") []))
       0)))
 
-(defn key! [(app (ptr App)) (ev (ptr i8)) (command bool)] (-> i64)
+(defn key! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow))) (ev (ptr i8)) (command bool)] (-> i64)
   (set! (field app typed) (.now app))
   (let [chars (msg (ptr i8) ev (objc-sel c"characters") [])]
     (if (null? chars)
@@ -342,7 +383,7 @@
                           (do (run-start! app) (rail-sync! app) 0)
                           0)
                     :else 0)
-              (cond (or (= first 13) (= first 10)) (send! app)
+              (cond (or (= first 13) (= first 10)) (send! app flows)
                     (= first 127) (input-backspace! app)
                     (= first 27) (input-clear! app)
                     (= first 9) (focus-next! app)
@@ -408,6 +449,17 @@
                   (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
                     (click! app cv flows (.x p) (- h (.y p)) w h))
                   0)
+                ;; Scroll wheel: only the conversation scrolls, and only when the
+                ;; pointer is over it.
+                (when (= ty 22)
+                  (let [pt (msg CGPoint ev (objc-sel c"locationInWindow") [])
+                        dy (msg f64 ev (objc-sel c"scrollingDeltaY") [])
+                        geom (alloc/stack Panes)]
+                    (store! geom (panes w h))
+                    (when (> (.x pt) (.convo-x geom))
+                      (scroll-by! app dy)
+                      0))
+                  0)
                 (when (or (= ty 5) (= ty 6))
                   (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
                     (hover! app cv (.x p) (- h (.y p)) w h))
@@ -416,7 +468,7 @@
                 ;; chain. Nothing there handles it, and an unhandled key event is
                 ;; precisely what makes AppKit beep on every keystroke.
                 (if (= ty 10)
-                    (key! app ev command)
+                    (key! app flows ev command)
                     (if (= ty 11)
                         0
                         (do (msg (ptr i8) nsapp (objc-sel c"sendEvent:") [(ptr i8)] ev) 0)))
@@ -515,52 +567,7 @@
                     (set! frame (+ (load frame) 1))
                     (usleep 16000))))
           0))))
-
-(defn type-and-send! [(app (ptr App)) (text (slice u8))] (-> i64)
-  (set-input! app text)
-  (send! app)
-  0)
-
-(defn demo [] (-> i64)
-  (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
-        space (CGColorSpaceCreateDeviceRGB)
-        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)]
-    (app-init! app a)
-    (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
-        (do (println "fonts failed to load — run from the project root") 1)
-        (do
-          (new-workflow! app)
-          (type-and-send! app "port the json writer onto the arena")
-          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
-          (write-png ctx c"demo-1-planned.png")
-
-          (type-and-send! app "add bench")
-          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
-          (write-png ctx c"demo-2-added.png")
-
-          (type-and-send! app "drop bench")
-          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
-          (write-png ctx c"demo-3-dropped.png")
-
-          (run-start! app)
-          (advance! app)
-          (advance! app)
-          (rail-sync! app)
-          (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
-          (write-png ctx c"demo-4-running.png")
-
-          (println "steps {d} · running {d} · done {d}"
-                   (step-count app)
-                   (count-in-state app "running")
-                   (count-in-state app "done"))
-          0))))
-
-;; The real thing, headless: discover the harness on disk, open a workflow, and
-;; render it. Same code path as the window, so what this writes is what the
-;; window shows.
-(defn render-real [(which i64) (w f64) (h f64)] (-> i64)
+(defn render-real [(which i64) (w f64) (h f64) (back f64)] (-> i64)
   (let [a (malloc-allocator)
         app (alloc/stack App)
         cv (alloc/stack Canvas)
@@ -590,7 +597,14 @@
           (if (= (canvas-init cv ctx h 2.0) 1)
               (do (println "fonts failed to load") 1)
               (do
+                ;; Draw once to publish the scroll limit, scroll, then draw for
+                ;; real: the limit is a property of the laid-out content.
                 (draw-app! cv app w h)
+                (when (> back 0.0) (scroll-by! app back) 0)
+                (draw-app! cv app w h)
+                (println "scroll={d} of {d}"
+                         (cast i64 (.scroll app))
+                         (cast i64 (.scroll-max app)))
                 (write-png ctx c"real.png")
                 (println "wrote real.png · {d} steps · {d} lines"
                          (step-count app)
@@ -654,39 +668,45 @@
     (println "spawned pid {d}" pid)
     0))
 
+;; Drives the authoring path headlessly: type a sentence into an empty
+;; conversation and see what lands on disk.
+(defn author-probe [(text (slice u8))] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        root (harness-root a)
+        (mut flows) (harness/discover a root "harness")]
+    (app-init! app a)
+    (rail-build! app (mut flows))
+    (println "root {s} · {d} workflows before" root (al-len [harness/Workflow] (load flows)))
+    (set-input! app text)
+    (send! app (mut flows))
+    (println "after: {d} workflows · open={d} title={s} steps={d} lines={d}"
+             (al-len [harness/Workflow] (load flows))
+             (.open app)
+             (.title app)
+             (step-count app)
+             (al-len [Line] (.lines app)))
+    0))
+
+(defn arg-num [(argc i32) (argv (ptr (ptr i8))) (at i64) (fallback f64)] (-> f64)
+  (if (<= (cast i64 argc) at)
+      fallback
+      (match (str-parse-int (cstr->str (load (index argv at))))
+        (Some [v] (cast f64 v))
+        (None [] fallback))))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
-  (if (and (> (primitive/cast i64 argc) 1)
-           (= (cstr->str (load (primitive/index argv 1))) "--render"))
-      (render-all)
-      (if (and (> (primitive/cast i64 argc) 1)
-               (= (cstr->str (load (primitive/index argv 1))) "--demo"))
-          (demo)
-          (if (and (> (primitive/cast i64 argc) 1)
-                   (= (cstr->str (load (primitive/index argv 1))) "--real"))
-              (render-real 0
-                           (if (> (cast i64 argc) 2)
-                               (cast f64
-                                     (match (str-parse-int (cstr->str (load (index argv 2))))
-                                       (Some [v] v)
-                                       (None [] WIDTH)))
-                               (cast f64 WIDTH))
-                           (if (> (cast i64 argc) 3)
-                               (cast f64
-                                     (match (str-parse-int (cstr->str (load (index argv 3))))
-                                       (Some [v] v)
-                                       (None [] HEIGHT)))
-                               (cast f64 HEIGHT)))
-              (if (and (> (primitive/cast i64 argc) 1)
-                       (= (cstr->str (load (primitive/index argv 1))) "--spawn-test"))
-                  (spawn-test)
-                  (if (and (> (primitive/cast i64 argc) 3)
-                           (= (cstr->str (load (primitive/index argv 1))) "--click"))
-                      (click-probe (primitive/cast f64
-                                                   (match (str-parse-int (cstr->str (load (primitive/index argv 2))))
-                                                     (Some [v] v)
-                                                     (None [] 0)))
-                                   (primitive/cast f64
-                                                   (match (str-parse-int (cstr->str (load (primitive/index argv 3))))
-                                                     (Some [v] v)
-                                                     (None [] 0))))
-                      (run-window)))))))
+  (let [flag (if (> (cast i64 argc) 1) (cstr->str (load (index argv 1))) "")]
+    (cond (= flag "--render") (render-all)
+          (= flag "--real")
+            (render-real 0
+                         (arg-num argc argv 2 (cast f64 WIDTH))
+                         (arg-num argc argv 3 (cast f64 HEIGHT))
+                         (arg-num argc argv 4 0.0))
+          (= flag "--spawn-test") (spawn-test)
+          (= flag "--author")
+            (author-probe (if (> (cast i64 argc) 2)
+                              (cstr->str (load (index argv 2)))
+                              "tidy the readme"))
+          (= flag "--click") (click-probe (arg-num argc argv 2 0.0) (arg-num argc argv 3 0.0))
+          :else (run-window))))

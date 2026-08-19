@@ -250,6 +250,15 @@
                                      ""
                                      0))
                 (set! i (+ (load i) 1)))))
+    ;; Everything loaded from a journal already happened, so it is stamped as
+    ;; long settled. Nothing that is merely being read should move on screen.
+    (let [(mut k) 0]
+      (loop (if (>= (load k) count)
+                (break)
+                (let [s (step-at app (load k))]
+                  (set! (.born s) 0.0)
+                  (set! (.changed s) 0.0)
+                  (set! k (+ (load k) 1))))))
     (set! (.journal app) "")
     (when (> (slice-len [u8] (.journal wf)) 0)
       (match (fs/read-file a (.journal wf))
@@ -403,3 +412,97 @@
   (set! (.journal wf) (newest-journal a root (.name wf)))
   (set! (.done wf) (journal-done-count a (.journal wf)))
   0)
+
+;; ---------------------------------------------------------------- authoring
+
+;; A directory name from a sentence: lowercase, one dash between words, bounded.
+(defn slugify [(a (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] text)
+        (mut out) (sb-new a)
+        (mut count) 0
+        (mut dashed) true
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (>= (load count) 28))
+              (break)
+              (let [c (primitive/cast i64 (slice-get [u8] text (load i)))
+                    lower (if (and (>= c 65) (<= c 90)) (+ c 32) c)
+                    word
+                      (or (and (>= lower 97) (<= lower 122))
+                          (and (>= lower 48) (<= lower 57)))]
+                (if word
+                    (do
+                      (sb-push-byte! (mut out) (primitive/cast u8 lower))
+                      (set! dashed false)
+                      (set! count (+ (load count) 1)))
+                    (when (not (load dashed))
+                      (sb-push-byte! (mut out) (primitive/cast u8 45))
+                      (set! dashed true)
+                      (set! count (+ (load count) 1))
+                      0))
+                (set! i (+ (load i) 1)))))
+    (let [s (sb-finish! (mut out))
+          len (slice-len [u8] s)
+          ;; A slug that hit the cap ends mid-word, so fall back to the last
+          ;; whole word rather than leaving "…-movement-to-t".
+          trimmed
+            (if (< (load i) n)
+                (let [(mut cut) len]
+                  (loop (if (or (<= (load cut) 0)
+                                (= (primitive/cast i64 (slice-get [u8] s (- (load cut) 1))) 45))
+                            (break)
+                            (set! cut (- (load cut) 1))))
+                  (if (> (load cut) 1) (substr s 0 (- (load cut) 1)) s))
+                s)
+          tlen (slice-len [u8] trimmed)]
+      (if (and (> tlen 0) (= (primitive/cast i64 (slice-get [u8] trimmed (- tlen 1))) 45))
+          (substr trimmed 0 (- tlen 1))
+          trimmed))))
+
+(defn json-escape [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)
+        (mut out) (sb-new a)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [c (primitive/cast i64 (slice-get [u8] s (load i)))]
+                (cond (= c 34) (sb-push-str! (mut out) "\\\"")
+                      (= c 92) (sb-push-str! (mut out) "\\\\")
+                      (= c 10) (sb-push-str! (mut out) "\\n")
+                      (= c 9) (sb-push-str! (mut out) "\\t")
+                      (< c 32) (sb-push-byte! (mut out) (primitive/cast u8 32))
+                      :else (sb-push-byte! (mut out) (primitive/cast u8 c)))
+                (set! i (+ (load i) 1)))))
+    (sb-finish! (mut out))))
+
+;; Write a real one-worker factory. This is the only thing in this app that
+;; creates something in the harness, and it creates the same shape a person
+;; would write by hand: a manifest and a worker in Markdown. Returns the folder,
+;; or "" if it could not be written.
+(defn create-workflow! [(a (ptr Allocator)) (root (slice u8)) (goal (slice u8))] (-> (slice u8))
+  (let [slug (slugify a goal)
+        name (if (= (slice-len [u8] slug) 0) "untitled" slug)
+        folder (path3 a root "/factories/" name)
+        manifest (join a folder "/factory.json")
+        worker (join a folder "/01-do.md")
+        (mut json) (sb-new a)
+        (mut md) (sb-new a)]
+    (dir/make-dir a folder 493)
+    (sb-push-str! (mut json) "{\n  \"name\": \"")
+    (sb-push-str! (mut json) name)
+    (sb-push-str! (mut json) "\",\n  \"goal\": \"")
+    (sb-push-str! (mut json) (json-escape a goal))
+    ;; `context` is not optional: the harness's loader rejects a manifest whose
+    ;; context is not an array, so an empty one is written explicitly.
+    (sb-push-str! (mut json) "\",\n  \"context\": [],\n")
+    (sb-push-str! (mut json) "  \"tools\": {\"groups\": [\"filesystem\", \"bash\"]},\n")
+    (sb-push-str! (mut json) "  \"workers\": [\"01-do.md\"]\n}\n")
+    (sb-push-str! (mut md) "# Worker: do the work\n\n")
+    (sb-push-str! (mut md) goal)
+    (sb-push-str! (mut md)
+                  "\n\nInspect the workspace before changing anything. Do the work above, and prove it with the project's own build and test commands rather than by describing it. Fix what fails instead of reporting it. Call `report_worker_status` only once the files and the commands provide concrete evidence.\n")
+    (match (fs/write-file a manifest (sb-finish! (mut json)))
+      (Err [e] "")
+      (Ok [n1]
+          (match (fs/write-file a worker (sb-finish! (mut md)))
+            (Err [e] "")
+            (Ok [n2] folder))))))
