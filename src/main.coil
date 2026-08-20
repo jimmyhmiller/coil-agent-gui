@@ -1,13 +1,15 @@
 ;; Entry point: an offscreen renderer and a window, over the same draw call.
 ;;
-;; `--render` writes one PNG per scene without opening anything, which is how the
-;; interface is inspected and reviewed; the window runs the identical `draw-app!`
-;; into a bitmap and hands it to the layer. Nothing about a view can be true in
-;; one mode and false in the other.
+;; `--real` and `--shot-issue` write a PNG of the real window state without
+;; opening anything, which is how the interface is inspected and reviewed; the
+;; window runs the identical `draw-app!` into a bitmap and hands it to the layer.
+;; Nothing about a view can be true in one mode and false in the other, and
+;; nothing here renders data that did not come off disk.
 (module coilgui.main)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.args" :as args)
+(import "coil.json" :as json)
 (import "coil.os" :as os)
 (import "coil.arraylist" :use *)
 (import "coil.primitive" :as primitive)
@@ -20,6 +22,7 @@
 (import "coilgui.model" :use *)
 (import "coilgui.util" :use *)
 (import "coilgui.view" :use *)
+(import "coilgui.dir" :as dir)
 (import "coilgui.harness" :as harness)
 (import "coilgui.service" :as service)
 
@@ -49,190 +52,55 @@
     (set! (.input app) (load fresh))
     0))
 
-(defn set-state! [(app (ptr App)) (at i64) (st State) (secs i64)] (-> i64)
-  (let [s (step-at app at)]
-    (set! (.state s) st)
-    (set! (.secs s) secs)
-    0))
-
-;; The conversation that produced the plan. In the running scenes the right pane
-;; shows the focused step's own transcript instead.
-(defn plan-conversation! [(app (ptr App))] (-> i64)
-  (lines-clear! app)
-  (push-line! app (mk-line (You) "move the json writer onto the arena, and check" ""))
-  (push-line! app (mk-line (Cont) "nothing else allocates its own buffer" ""))
-  (push-line! app (mk-line (Agent) "Four steps. I read the three writers first, then" ""))
-  (push-line! app (mk-line (Cont) "port the writer and the reader, then run the json" ""))
-  (push-line! app (mk-line (Cont) "tests over both." ""))
-  (push-line! app (mk-line (Agent) "The reader is the risky one — providers depend on" ""))
-  (push-line! app (mk-line (Cont) "its signature. Say the word and I will drop it." ""))
-  (push-line! app (mk-line (You) "keep it, but run the tests before the reader lands" ""))
-  (push-line! app (mk-line (Agent) "Done — test depends on the writer only now." ""))
-  0)
-
-(defn running-conversation! [(app (ptr App))] (-> i64)
-  (lines-clear! app)
-  (push-line! app (mk-line (Tool) "Read  src/core/json.coil" ""))
-  (push-line! app (mk-line (Result) "561 lines" ""))
-  (push-line! app (mk-line (Agent) "The arena is only threaded through the writer. The" ""))
-  (push-line! app (mk-line (Cont) "reader still takes an allocator argument." ""))
-  (push-line! app (mk-line (Tool) "Edit  src/core/json.coil" "+18 −6"))
-  (push-line! app (mk-line (Tool) "Bash  cargo test json" ""))
-  (push-line! app (mk-line (Result) "running…" ""))
-  (push-line! app (mk-line (Pending) "leave the reader alone for now — providers" ""))
-  0)
-
-(defn asks-conversation! [(app (ptr App))] (-> i64)
-  (lines-clear! app)
-  (push-line! app (mk-line (Tool) "Read  src/providers/openai_chat_wire.coil" ""))
-  (push-line! app (mk-line (Result) "360 lines" ""))
-  (push-line! app (mk-line (Agent) "The reader signature is public. Changing it breaks" ""))
-  (push-line! app (mk-line (Cont) "two providers unless I port them in this step too." ""))
-  (push-line! app (mk-line (Asks) "approve, or say what to do instead" ""))
-  0)
-
-(defn done-conversation! [(app (ptr App))] (-> i64)
-  (lines-clear! app)
-  (push-line! app (mk-line (Tool) "Bash  cargo test json" ""))
-  (push-line! app (mk-line (Result) "47 passed" ""))
-  (push-line! app (mk-line (Agent) "All four steps done. The wire codec still has its" ""))
-  (push-line! app (mk-line (Cont) "own buffer — it was outside what you asked for." ""))
-  (push-line! app (mk-line (You) "now do the same for the wire codec" ""))
-  (push-line! app (mk-line (Agent) "One step, same shape. Run it and I will start." ""))
-  0)
-
-(defn scene! [(app (ptr App)) (which Scene)] (-> i64)
-  (set! (.scene app) which)
-  (set-input! app "")
-  (match which
-    (SceneNew []
-              (do
-                (steps-clear! app)
-                (lines-clear! app)
-                (set! (.title app) "untitled")
-                (set! (.selected app) 1)
-                0))
-    (ScenePlan []
-               (do
-                 (propose-plan! app)
-                 (plan-conversation! app)
-                 (set! (.focus app) 1)
-                 0))
-    (SceneRunning []
-                  (do
-                    (propose-plan! app)
-                    (set-state! app 0 (SDone) 22)
-                    (set-state! app 1 (SRunning) 252)
-                    (running-conversation! app)
-                    (set! (.focus app) 1)
-                    0))
-    (SceneAsks []
-               (do
-                 (propose-plan! app)
-                 (set-state! app 0 (SDone) 22)
-                 (set-state! app 1 (SDone) 220)
-                 (set-state! app 2 (SAsks) 65)
-                 (asks-conversation! app)
-                 (set! (.focus app) 2)
-                 0))
-    (SceneDone []
-               (do
-                 (propose-plan! app)
-                 (set-state! app 0 (SDone) 22)
-                 (set-state! app 1 (SDone) 220)
-                 (set-state! app 2 (SDone) 138)
-                 (set-state! app 3 (SDone) 31)
-                 (done-conversation! app)
-                 (set! (.focus app) 3)
-                 0)))
-  0)
-
-(defn render-scene! [(app (ptr App)) (cv (ptr Canvas)) (ctx (ptr i8)) (which Scene) (path (ptr i8))] (-> i64)
-  (scene! app which)
-  (rail-sync! app)
-  (draw-app! cv app (primitive/cast f64 WIDTH) (primitive/cast f64 HEIGHT))
-  (write-png ctx path)
-  0)
-
-(defn render-all [] (-> i64)
-  (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
-        space (CGColorSpaceCreateDeviceRGB)
-        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)]
-    (app-init! app a)
-    (if (= (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0) 1)
-        (do (println "fonts failed to load — run from the project root") 1)
-        (do
-          (render-scene! app cv ctx (SceneNew) c"shot-1-new.png")
-          (render-scene! app cv ctx (ScenePlan) c"shot-2-plan.png")
-          (render-scene! app cv ctx (SceneRunning) c"shot-3-running.png")
-          (render-scene! app cv ctx (SceneAsks) c"shot-4-asks.png")
-          (render-scene! app cv ctx (SceneDone) c"shot-5-done.png")
-          (println "wrote 5 screenshots")
-          0))))
-
 ;; ---------------------------------------------------------------- interaction
+;; ---------------------------------------------------------------- interaction
+;;
+;; The model this window is built on:
+;;
+;;   A PROJECT is a directory — a checkout you have, declared in projects.json.
+;;   A WORKFLOW is a reusable definition. It belongs to no project.
+;;   A RUN is one workflow, executed once, in one project. It is the only thing
+;;   that has state, and the project it belongs to is the workspace its own
+;;   journal recorded.
+;;
+;; So the rail is projects and what has happened in them, and under that, the
+;; library of workflows. Running is picking a project and a workflow; creating a
+;; workflow is a different act, and does not happen in a project at all.
 
-(defn send! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow)))] (-> i64)
-  (let [a (.alc app)
-        text (own-str a (input-slice app))]
-    (if (= (slice-len [u8] text) 0)
-        0
-        (do
-          (push-wrapped! app (You) text 52)
-          (input-clear! app)
-          (if (> (step-count app) 0)
-              ;; There is nothing to say to a run that is already recorded. The
-              ;; harness has no way to deliver a message into a live one either —
-              ;; its only intervention is cancel — so this says so rather than
-              ;; pretending the message went somewhere.
-              (do
-                (push-wrapped! app
-                               (Agent)
-                               "This is a recorded run, so there is nobody to answer. Press ⌘N and describe what you want to happen next; that writes a workflow you can run."
-                               52)
-                0)
-              ;; An empty conversation authors a real factory: a manifest and a
-              ;; worker, in the harness, exactly as a person would write them.
-              (let [root (harness-root a)
-                    folder (harness/create-workflow! a root text)]
-                (if (= (slice-len [u8] folder) 0)
-                    (do
-                      (push-wrapped! app (Agent) "I could not write that workflow to disk." 52)
-                      0)
-                    (do
-                      (set! flows (harness/discover a root "harness"))
-                      (rail-build! app (mut flows))
-                      (let [n (al-len [harness/Workflow] (load flows))
-                            (mut found) -1
-                            (mut i) 0]
-                        (loop (if (or (>= (load i) n) (>= (load found) 0))
-                                  (break)
-                                  (do
-                                    (when (= (.folder (al-elem [harness/Workflow] flows (load i))) folder)
-                                      (set! found (load i))
-                                      0)
-                                    (set! i (+ (load i) 1)))))
-                        (when (>= (load found) 0)
-                          (open-workflow! app flows (load found))
-                          (let [(mut row) 0
-                                items (al-len [Item] (.items app))]
-                            (loop (if (>= (load row) items)
-                                      (break)
-                                      (do
-                                        (when (= (.source (al-elem [Item] (field app items) (load row))) (load found))
-                                          (set! (.selected app) (load row))
-                                          0)
-                                        (set! row (+ (load row) 1))))))
-                          0)
-                        0)
-                      (push-wrapped! app
-                                     (Agent)
-                                     (join2 "Wrote the workflow to " folder)
-                                     52)
-                      (push-wrapped! app (Agent) "One step, queued. Run it when you are ready." 52)
-                      0))))))))
+;; Everything this window reads off disk, in one value. A click on a rail row has
+;; to be able to reach any of it, so they travel together rather than as four
+;; parameters that can disagree.
+(defstruct World
+  [(root (slice u8))
+   (projects (ArrayList harness/Project))
+   (flows (ArrayList harness/Workflow))
+   (runs (ArrayList harness/Run))
+   (issues (ArrayList harness/Issue))
+   ;; The harness's own run service, which is where the agent that designs a
+   ;; workflow actually lives. Started on demand, on loopback, with a token this
+   ;; process makes up.
+   (svc service/Service)
+   ;; The library as it was before an authoring conversation started, so what it
+   ;; wrote can be told apart from what was already there.
+   (before (ArrayList (slice u8)))])
+
+(defn world-load! [(world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (set! (.root world) (harness-root a))
+  (set! (.projects world) (harness/discover-projects a))
+  (set! (.flows world) (harness/discover a (.root world)))
+  (set! (.runs world) (harness/discover-runs a (.root world) (field world projects)))
+  (set! (.issues world) (harness/discover-issues a (.root world)))
+  (set! (.before world) (al-new [(slice u8)] a))
+  (let [port (service/port-for-root (.root world))]
+    (service/init! (field world svc) a (.root world) port port))
+  0)
+
+;; Runs and issues change while the window is open; the library and the project
+;; list do not, so a reload after starting something re-reads only what moved.
+(defn world-refresh! [(world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (set! (.runs world) (harness/discover-runs a (.root world) (field world projects)))
+  (set! (.issues world) (harness/discover-issues a (.root world)))
+  0)
 
 (defn harness-root [(a (ptr Allocator))] (-> (slice u8))
   (match (os/env-get a "COIL_HARNESS_ROOT")
@@ -242,48 +110,239 @@
           (None [] "../coil-agent-harness")))
     (Err [e] "../coil-agent-harness")))
 
-;; The rail, from the factories actually on disk: one heading per project, one
-;; row per workflow, each row remembering which workflow it came from.
-(defn rail-build! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow)))] (-> i64)
-  (let [a (.alc app)
-        n (al-len [harness/Workflow] (load flows))
-        (mut project) ""
+(defn project-count [(world (ptr World))] (-> i64)
+  (al-len [harness/Project] (.projects world)))
+
+(defn project-at [(world (ptr World)) (at i64)] (-> (ptr harness/Project))
+  (al-elem [harness/Project] (field world projects) at))
+
+;; The project everything acts in. Never -1 once any project is declared: the
+;; first one is current until you pick another, so Run always has somewhere to
+;; run and ⌘I always has somewhere to file.
+(defn current-project [(app (ptr App)) (world (ptr World))] (-> i64)
+  (if (= (project-count world) 0)
+      -1
+      (if (and (>= (.project app) 0) (< (.project app) (project-count world)))
+          (.project app)
+          0)))
+
+(defn current-project-name [(app (ptr App)) (world (ptr World))] (-> (slice u8))
+  (let [at (current-project app world)]
+    (if (< at 0) "" (.name (project-at world at)))))
+
+(defn current-project-label [(app (ptr App)) (world (ptr World))] (-> (slice u8))
+  (let [at (current-project app world)]
+    (if (< at 0) "" (.label (project-at world at)))))
+
+(defn project-index [(world (ptr World)) (name (slice u8))] (-> i64)
+  (let [n (project-count world)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (.name (project-at world (load i))) name) (store! found (load i)) 0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; ---------------------------------------------------------------- the rail
+
+;; One heading per project, then what has happened in it: its runs, newest
+;; first, and the issues filed there. Then the library — the workflows you can
+;; run in any project. Nothing appears that is not one of those things.
+(defn rail-build! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (let [n (project-count world)
         (mut i) 0]
-    (set! (.items app) (al-new [Item] a))
+    (set! (.items app) (al-new [Item] (.alc app)))
     (loop (if (>= (load i) n)
               (break)
-              (let [w (al-elem [harness/Workflow] flows (load i))
-                    steps (al-len [(slice u8)] (.workers w))
-                    done (.done w)]
-                (when (!= (.project w) (load project))
-                  (set! project (.project w))
-                  (al-push! [Item] (field app items) (mk-item (.project w) "" (SQueued) "" true -1))
-                  0)
+              (do
+                (rail-project! app world (load i))
+                (set! i (+ (load i) 1)))))
+    (rail-library! app world)
+    0))
+
+(defn rail-project! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (let [a (.alc app)
+        p (project-at world at)
+        name (.name p)
+        runs (al-len [harness/Run] (.runs world))
+        issues (al-len [harness/Issue] (.issues world))
+        (mut rows) 0
+        (mut i) 0]
+    (al-push! [Item] (field app items) (mk-item (.label p) name (SQueued) "" (ItemProject) at))
+    (loop (if (>= (load i) runs)
+              (break)
+              (do
+                (let [r (al-elem [harness/Run] (field world runs) (load i))]
+                  (when (= (.project r) name)
+                    (al-push! [Item]
+                              (field app items)
+                              (mk-item name
+                                       (.workflow r)
+                                       (.state r)
+                                       ;; Copied out of the formatting ring:
+                                       ;; this string outlives the frame.
+                                       (cond (.stopped r) "stopped"
+                                             (.abandoned r) "abandoned"
+                                             :else
+                                               (own-str a
+                                                        (join3 (dec-str (.done r))
+                                                               "/"
+                                                               (dec-str (.total r)))))
+                                       (ItemRun)
+                                       (load i)))
+                    (store! rows (+ (load rows) 1))
+                    0))
+                (set! i (+ (load i) 1)))))
+    (set! i 0)
+    (loop (if (>= (load i) issues)
+              (break)
+              (do
+                (let [issue (al-elem [harness/Issue] (field world issues) (load i))]
+                  (when (= (.project issue) name)
+                    (al-push! [Item]
+                              (field app items)
+                              (mk-item name (.title issue) (SQueued) "issue" (ItemIssue) (load i)))
+                    (store! rows (+ (load rows) 1))
+                    0))
+                (set! i (+ (load i) 1)))))
+    ;; A project with nothing in it is not an error and must not look like one.
+    ;; It is where you start, so it says what to do.
+    (when (= (load rows) 0)
+      (al-push! [Item]
+                (field app items)
+                (mk-item name "nothing has run here yet" (SQueued) "" (ItemNote) -1))
+      0)
+    0))
+
+(defn rail-library! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (let [a (.alc app)
+        n (al-len [harness/Workflow] (.flows world))
+        (mut i) 0]
+    (al-push! [Item] (field app items) (mk-item "workflows" "" (SQueued) "" (ItemLibrary) -1))
+    (loop (if (>= (load i) n)
+              (break)
+              (let [w (al-elem [harness/Workflow] (field world flows) (load i))
+                    steps (al-len [(slice u8)] (.workers w))]
                 (al-push! [Item]
                           (field app items)
-                          (mk-item (.project w)
+                          (mk-item ""
                                    (.name w)
-                                   (cond (= steps 0) (SQueued)
-                                         (>= done steps) (SDone)
-                                         (> done 0) (SRunning)
-                                         :else (SQueued))
-                                   ;; Copied out of the formatting ring: this
-                                   ;; string outlives the frame that built it.
-                                   (if (= steps 0)
-                                       ""
-                                       (own-str a (join3 (dec-str done) "/" (dec-str steps))))
-                                   false
+                                   (SQueued)
+                                   (own-str a (join2 (dec-str steps) (if (= steps 1) " step" " steps")))
+                                   (ItemWorkflow)
                                    (load i)))
                 (set! i (+ (load i) 1)))))
     0))
 
-(defn open-workflow! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow))) (at i64)] (-> i64)
-  (when (and (>= at 0) (< at (al-len [harness/Workflow] (load flows))))
-    (harness/load-into! app (al-elem [harness/Workflow] flows at))
-    (set! (.open app) at)
+(defn select-row! [(app (ptr App)) (row i64)] (-> i64)
+  (set! (.selected app) row)
+  0)
+
+;; The rail row a view occupies, so selection follows what was opened.
+(defn row-of-run [(app (ptr App)) (at i64)] (-> i64)
+  (let [n (al-len [Item] (.items app))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (let [it (al-elem [Item] (field app items) (load i))]
+                (when (and (item-run? it) (= (.source it) at)) (store! found (load i)) 0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn row-of-issue [(app (ptr App)) (at i64)] (-> i64)
+  (let [n (al-len [Item] (.items app))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (let [it (al-elem [Item] (field app items) (load i))]
+                (when (and (item-issue? it) (= (.source it) at)) (store! found (load i)) 0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; ---------------------------------------------------------------- opening
+
+(defn open-project! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (when (and (>= at 0) (< at (project-count world)))
+    (set! (.project app) at)
+    (set! (.open-needs-input app) false)
+    (set! (.chosen app) -1)
+    (set! (.view app) (ViewProject at))
+    (steps-clear! app)
+    (lines-clear! app)
+    (set! (.title app) (.label (project-at world at)))
+    (set! (.factory app) "")
+    (set! (.journal app) "")
+    (scroll-reset! app)
+    (let [p (project-at world at)]
+      (push-wrapped! app (Cont) (.path p) 52)
+      (when (> (slice-len [u8] (.summary p)) 0)
+        (push-wrapped! app (Cont) (.summary p) 52)
+        0)
+      (push-wrapped! app
+                     (Cont)
+                     "Pick a workflow to run it here. ⌘I files an issue in this project; ⌘N writes a new workflow."
+                     52)
+      0)
+    0)
+  0)
+
+(defn open-run! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (when (and (>= at 0) (< at (al-len [harness/Run] (.runs world))))
+    (let [r (al-elem [harness/Run] (field world runs) at)
+          wi (harness/workflow-index (field world flows) (.workflow r))
+          workers
+            (if (< wi 0)
+                (al-new [(slice u8)] (.alc app))
+                (.workers (al-elem [harness/Workflow] (field world flows) wi)))]
+      (harness/load-run! app r workers)
+      (set! (.view app) (ViewRun at))
+      (let [pi (project-index world (.project r))]
+        (when (>= pi 0) (set! (.project app) pi) 0))
+      (scroll-reset! app)
+      (set! (.focus app) 0)
+      (harness/rebuild-lines! app)
+      0)
+    0)
+  0)
+
+(defn open-workflow! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (when (and (>= at 0) (< at (al-len [harness/Workflow] (.flows world))))
+    (harness/load-workflow! app (al-elem [harness/Workflow] (field world flows) at))
+    (set! (.view app) (ViewWorkflow at))
+    (set! (.open-needs-input app)
+          (> (slice-len [u8] (.input (al-elem [harness/Workflow] (field world flows) at))) 0))
     (scroll-reset! app)
     (set! (.focus app) 0)
-    (harness/rebuild-lines! app)
+    0)
+  0)
+
+;; The workflow an issue would be handed to: the one its project declares, found
+;; among the workflows actually on disk. -1 when that workflow is not there,
+;; which the pane says rather than silently running something else.
+(defn issue-workflow-index [(world (ptr World)) (issue (ptr harness/Issue))] (-> i64)
+  (harness/workflow-index (field world flows)
+                          (harness/project-issue-workflow (field world projects)
+                                                          (.project issue))))
+
+(defn open-issue! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (when (and (>= at 0) (< at (al-len [harness/Issue] (.issues world))))
+    (let [issue (al-elem [harness/Issue] (field world issues) at)
+          wi (issue-workflow-index world issue)]
+      (if (< wi 0)
+          (harness/load-issue! app issue "" (al-new [(slice u8)] (.alc app)))
+          (let [wf (al-elem [harness/Workflow] (field world flows) wi)]
+            (harness/load-issue! app issue (.name wf) (.workers wf))))
+      (set! (.view app) (ViewIssue at))
+      (set! (.open-needs-input app) false)
+      (let [pi (project-index world (.project issue))]
+        (when (>= pi 0) (set! (.project app) pi) 0))
+      (scroll-reset! app)
+      (set! (.focus app) 0)
+      0)
     0)
   0)
 
@@ -294,48 +353,781 @@
       0)
     0))
 
+;; ---------------------------------------------------------------- creating
+
+;; A workflow is written into the library and belongs to no project, so this
+;; asks for no project and offers none.
 (defn new-workflow! [(app (ptr App))] (-> i64)
   (steps-clear! app)
   (lines-clear! app)
   (input-clear! app)
-  (set! (.title app) "untitled")
+  (set! (.title app) "new workflow")
   (set! (.running app) false)
   (set! (.focus app) 0)
-  (set! (.selected app) 1)
-  (rail-sync! app)
+  (set! (.view app) (ViewNothing))
+  (set! (.compose app) (ComposeWorkflow))
   0)
+
+;; An issue is filed in a project — the current one, which is whatever you last
+;; clicked under. With nothing declared, this says so rather than writing an
+;; issue that nothing can run.
+(defn new-issue! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (steps-clear! app)
+  (lines-clear! app)
+  (input-clear! app)
+  (set! (.running app) false)
+  (set! (.focus app) 0)
+  (set! (.view app) (ViewNothing))
+  (set! (.compose app) (ComposeIssue))
+  (if (< (current-project app world) 0)
+      (do
+        (set! (.title app) "no project")
+        (push-wrapped! app
+                       (Agent)
+                       "An issue is filed in a project, and none are declared. Add one to ~/.coil-agent-harness/projects.json and it will appear in the rail."
+                       52)
+        0)
+      (do
+        (set! (.title app)
+              (let [(mut t) (sb-new (.alc app))]
+                (sb-push-str! (mut t) "backlog · ")
+                (sb-push-str! (mut t) (current-project-label app world))
+                (sb-finish! (mut t))))
+        0)))
+
+;; ---------------------------------------------------------------- sending
+
+(defn send! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (let [a (.alc app)
+        text (own-str a (input-slice app))]
+    (if (= (slice-len [u8] text) 0)
+        0
+        (do
+          (push-wrapped! app (You) text 52)
+          (input-clear! app)
+          (match (.compose app)
+            (ComposeIssue [] (backlog-send! app world text))
+            (ComposeWorkflow []
+                             (if (live-run? app world)
+                                 (say-to-run! app world text)
+                             (if (>= (view-run app) 0)
+                                 ;; A finished run has nobody listening, but the
+                                 ;; work it did is still there. Carry it on.
+                                 (carry-on! app world text)
+                             (if (> (step-count app) 0)
+                                 ;; There is nothing to say to a run that already
+                                 ;; happened. The harness cannot deliver a message
+                                 ;; into a live one either — its only intervention
+                                 ;; is cancel — so this says so rather than
+                                 ;; pretending the message went somewhere.
+                                 (do
+                                   (push-wrapped! app
+                                                  (Agent)
+                                                  "Nothing here is listening. ⌘N writes a new workflow; ⌘I files an issue in this project."
+                                                  52)
+                                   0)
+                                 (author-send! app world text))))))))))
+
+;; Say it to a run that has already finished: start the same workflow again, in
+;; the same project, with what you said as its instruction and the finished run
+;; named so the agent can pick up where it left off.
+(defn carry-on! [(app (ptr App)) (world (ptr World)) (text (slice u8))] (-> i64)
+  (let [a (.alc app)
+        at (view-run app)
+        run (al-elem [harness/Run] (field world runs) at)
+        wi (harness/workflow-index (field world flows) (.workflow run))]
+    (if (< wi 0)
+        (do
+          (push-wrapped! app
+                         (Agent)
+                         "That workflow is not in the library any more, so there is nothing to carry on with."
+                         52)
+          0)
+        (let [wf (al-elem [harness/Workflow] (field world flows) wi)
+              context (harness/write-followup! a (.root world) run text)]
+          (if (= (slice-len [u8] context) 0)
+              (do (push-wrapped! app (Agent) "I could not write that down." 52) 0)
+              (let [pid (harness/start-followup! a
+                                                 (.root world)
+                                                 (.folder wf)
+                                                 (.project run)
+                                                 context)]
+                (println "carry on {s} in {s} · pid {d}" (.name wf) (.project run) pid)
+                (set! (.run-pid app) pid)
+                (push-wrapped! app
+                               (Cont)
+                               "carrying on — a new run of this workflow, in the same workspace, with what you just said"
+                               52)
+                (await-run! app world (.name wf))
+                0))))))
+
+;; Is what is open a run that is still going? Only then is there anybody to talk
+;; to: a finished run has nobody listening, and saying so is better than dropping
+;; the words.
+(defn live-run? [(app (ptr App)) (world (ptr World))] (-> bool)
+  (let [at (view-run app)]
+    (if (< at 0)
+        false
+        (let [run (al-elem [harness/Run] (field world runs) at)]
+          (match (.state run) (SRunning [] true) (_ false))))))
+
+;; Say it to the agent that is working right now. It lands at that agent's next
+;; turn, and the journal records it, so the transcript shows it where it happened
+;; rather than only in this window.
+(defn say-to-run! [(app (ptr App)) (world (ptr World)) (text (slice u8))] (-> i64)
+  (let [a (.alc app)
+        run (al-elem [harness/Run] (field world runs) (view-run app))]
+    (if (harness/say-to-run! a (.root world) (.run-id run) text)
+        (do
+          (push-wrapped! app
+                         (Cont)
+                         "sent — the agent picks this up at its next turn"
+                         52)
+          ;; Whatever it does next is in the journal, so start watching again.
+          (set! (.running app) true)
+          0)
+        (do
+          (push-wrapped! app (Agent) "I could not deliver that to the run." 52)
+          0))))
+
+;; What the authoring agent is told. It writes the same shape a person would
+;; write by hand, because that is all a workflow is: a folder with a manifest and
+;; one Markdown file per step.
+;; What the agent that keeps the backlog is told. Filing an issue by hand means
+;; writing down what you already understand; talking to something that can read
+;; the code means finding out what is actually there first, and ending up with
+;; several issues rather than one vague one.
+(const BACKLOG_BRIEF
+  "You are keeping the issue backlog for a project in the COIL agent harness.\n\nAn issue is one Markdown file under `.factory-issues/` in the checkout you are running in, named `<slug>.md`, shaped like this:\n\n---\nproject: <project>\n---\n\n# One line saying what is wrong or what should change\n\nWhat the current behaviour is, what it should be instead, and anything that makes it concrete: file names, function names, commands that show it. Written for whoever picks it up later, who will not have this conversation.\n\nWork with the person. Ask about anything genuinely ambiguous rather than guessing, and read the project itself before writing -- you can reach it with bash and absolute paths, and a concrete issue naming real files is worth ten vague ones. When the conversation has produced work worth recording, write one file per issue: split anything that is really two pieces of work, and do not invent issues nobody asked for.\n\nWrite only under `.factory-issues/`. Do not implement anything, do not touch the project, and do not start a run. When you have written files, reply with one short line naming each issue you wrote.\n\nThe project is: ")
+
+(const AUTHOR_BRIEF
+  "You are designing a workflow for the COIL agent harness, in the checkout you are running in.\n\nA workflow is a folder under `factories/`. It holds `factory.json`:\n\n{\"name\": \"<folder-name>\", \"goal\": \"<one sentence>\", \"context\": [], \"tools\": {\"groups\": [\"filesystem\", \"bash\"]}, \"workers\": [\"01-<step>.md\", \"02-<step>.md\"]}\n\nand one Markdown file per worker, named `NN-<step>.md`, whose contents are the instructions that worker follows. Workers are the steps: they run in order, each with tools rooted at the workspace the workflow is run in, and each ends by calling report_worker_status. `context` must be present even when empty. The folder name and the `name` field must match and be lowercase with dashes.\n\nDecide the steps yourself from the request. Do not add a step with no work in it, and do not write a workspace, a run, or anything outside the new folder. Read an existing folder under `factories/` first if it helps you match the house style.\n\nWhen the files are written, reply with one short line naming the folder and its steps.\n\nThe request: ")
+
+(defn gui-ms [] (-> i64)
+  (cast i64 (* 1000.0 (CACurrentMediaTime))))
+
+(defn agent-id! [(app (ptr App)) (a (ptr Allocator)) (prefix (slice u8))] (-> (slice u8))
+  (set! (.agent-seq app) (+ (.agent-seq app) 1))
+  (own-str a (join3 prefix (dec-str (gui-ms)) (join2 "-" (dec-str (.agent-seq app))))))
+
+;; ⌘N is a conversation with an agent that designs the workflow and writes it.
+;; The first message starts the harness's service if nothing is answering yet;
+;; every message after that continues the same conversation.
+;; Talking to the backlog. The first message carries the brief and which project
+;; this is about; everything after continues the same conversation, so "split
+;; that into two" and "add one about the composer" work the way they read.
+(defn backlog-send! [(app (ptr App)) (world (ptr World)) (text (slice u8))] (-> i64)
+  (let [a (.alc app)
+        at (current-project app world)]
+    (if (< at 0)
+        (do (push-wrapped! app (Agent) "There is no project to file anything in yet." 52) 0)
+        (let [project (project-at world at)
+              first (= (slice-len [u8] (.agent-conversation app)) 0)
+              prompt
+                (if first
+                    (let [(mut whole) (sb-new a)]
+                      (sb-push-str! (mut whole) BACKLOG_BRIEF)
+                      (sb-push-str! (mut whole) (.name project))
+                      (sb-push-str! (mut whole) ", whose checkout is at ")
+                      (sb-push-str! (mut whole) (.path project))
+                      (sb-push-str! (mut whole) " -- put that name in the front matter of every issue you write.\n\n")
+                      (sb-push-str! (mut whole) text)
+                      (sb-finish! (mut whole)))
+                    text)]
+          (when first
+            (set! (.agent-conversation app) (agent-id! app a "gui-backlog-"))
+            (set! (.before world) (issue-files app world))
+            0)
+          (set! (.agent-prompt app) (own-str a prompt))
+          (set! (.agent-stage app) 1)
+          (set! (.agent-since app) (.now app))
+          (set! (.running app) true)
+          (push-wrapped! app (Agent) "Thinking about that…" 52)
+          0))))
+
+(defn issue-files [(app (ptr App)) (world (ptr World))] (-> (ArrayList (slice u8)))
+  (let [a (.alc app)
+        n (al-len [harness/Issue] (.issues world))
+        (mut out) (al-new [(slice u8)] a)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (al-push! [(slice u8)]
+                          (mut out)
+                          (.file (al-elem [harness/Issue] (field world issues) (load i))))
+                (set! i (+ (load i) 1)))))
+    (load out)))
+
+(defn author-send! [(app (ptr App)) (world (ptr World)) (text (slice u8))] (-> i64)
+  (let [a (.alc app)
+        first (= (slice-len [u8] (.agent-conversation app)) 0)
+        ;; The brief plus the request, built with the allocator: util's ring
+        ;; cells are 64 bytes, and a prompt cut at 64 bytes is how you send an
+        ;; agent half a sentence and get a confused question back.
+        prompt
+          (if first
+              (let [(mut whole) (sb-new a)]
+                (sb-push-str! (mut whole) AUTHOR_BRIEF)
+                (sb-push-str! (mut whole) text)
+                (sb-finish! (mut whole)))
+              text)]
+    (when first
+      (set! (.agent-conversation app) (agent-id! app a "gui-author-"))
+      (set! (.before world) (flow-folders app world))
+      0)
+    (set! (.agent-prompt app) (own-str a prompt))
+    (set! (.agent-stage app) 1)
+    (set! (.agent-since app) (.now app))
+    (set! (.running app) true)
+    (push-wrapped! app (Agent) "Thinking about that…" 52)
+    0))
+
+(defn flow-folders [(app (ptr App)) (world (ptr World))] (-> (ArrayList (slice u8)))
+  (let [a (.alc app)
+        n (al-len [harness/Workflow] (.flows world))
+        (mut out) (al-new [(slice u8)] a)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (al-push! [(slice u8)]
+                          (mut out)
+                          (.folder (al-elem [harness/Workflow] (field world flows) (load i))))
+                (set! i (+ (load i) 1)))))
+    (load out)))
+
+;; The service is a child process, started once and reused. Nothing is exposed:
+;; loopback, and a token this process invents.
+(defn agent-service-ready? [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> bool)
+  (if (service/probe a (field world svc))
+      true
+      (do
+        ;; Spawning twice is harmless — the second one loses the port and exits —
+        ;; but pointless, so it is only tried once every few seconds.
+        (when (> (- (.now app) (.agent-since app)) 2.0)
+          (service/start! a (field world svc) (fnptr-of harness/spawn-shell))
+          (set! (.agent-since app) (.now app))
+          0)
+        false)))
+
+(defn agent-post! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (let [run (agent-id! app a "gui-run-")
+        (mut body) (sb-new a)]
+    (sb-push-str! (mut body) "{\"version\":1,\"command_id\":\"")
+    (sb-push-str! (mut body) (agent-id! app a "gui-cmd-"))
+    (sb-push-str! (mut body) "\",\"run_id\":\"")
+    (sb-push-str! (mut body) run)
+    (sb-push-str! (mut body) "\",\"conversation_id\":\"")
+    (sb-push-str! (mut body) (.agent-conversation app))
+    (sb-push-str! (mut body) "\",\"provider\":\"")
+    (sb-push-str! (mut body) (author-provider a))
+    (sb-push-str! (mut body) "\",\"model\":\"")
+    (sb-push-str! (mut body) (author-model a))
+    (sb-push-str! (mut body) "\",\"prompt\":\"")
+    (sb-push-str! (mut body) (harness/json-escape a (.agent-prompt app)))
+    (sb-push-str! (mut body) "\"}")
+    (match (service/ask a (field world svc) "POST" "/v1/runs" (sb-finish! (mut body)))
+      (None []
+            (do
+              (push-wrapped! app (Agent) "The service did not answer." 52)
+              (set! (.agent-stage app) 0)
+              (set! (.running app) false)
+              0))
+      (Some [response]
+            (let [r response]
+              (if (or (< (.status r) 200) (>= (.status r) 300))
+                  (do
+                    (push-wrapped! app (Agent) "The service refused that:" 52)
+                    (push-wrapped! app (Agent) (own-str a (.body r)) 52)
+                    (set! (.agent-stage app) 0)
+                    (set! (.running app) false)
+                    0)
+                  (do
+                    (set! (.agent-run app) run)
+                    (set! (.agent-after app) 0)
+                    (set! (.agent-stage app) 2)
+                    0)))))))
+
+;; Who designs the workflow. The subscription is the default because it is the
+;; one that is reachable without a key; COIL_GUI_PROVIDER and COIL_GUI_MODEL
+;; name any other provider the harness knows, including one declared in
+;; providers.json.
+(defn author-provider [(a (ptr Allocator))] (-> (slice u8))
+  (let [named (harness/env-or a "COIL_GUI_PROVIDER" "")]
+    (if (> (slice-len [u8] named) 0) named "claude")))
+
+(defn author-model [(a (ptr Allocator))] (-> (slice u8))
+  (let [named (harness/env-or a "COIL_GUI_MODEL" "")]
+    (if (> (slice-len [u8] named) 0) named "claude-sonnet-4-6")))
+
+;; Everything the agent has said or done since the last poll, in the same shapes
+;; a replayed run uses — the pane cannot tell a live agent from a recorded one,
+;; which is the point.
+(defn agent-poll! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (let [(mut path) (sb-new a)]
+    (sb-push-str! (mut path) "/v1/runs/")
+    (sb-push-str! (mut path) (.agent-run app))
+    (sb-push-str! (mut path) "/events?after=")
+    (sb-push-str! (mut path) (dec-str (.agent-after app)))
+    (match (service/ask a (field world svc) "GET" (sb-finish! (mut path)) "")
+      (None [] 0)
+      (Some [response]
+            (let [r response]
+              (if (or (< (.status r) 200) (>= (.status r) 300))
+                  0
+                  (agent-absorb! app world a (.body r))))))))
+
+(defn agent-absorb! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator)) (body (slice u8))] (-> i64)
+  (match (json/parse a body)
+    (Err [e] 0)
+    (Ok [d]
+        (let [at (json/object-get d 0 "events")
+              cursor (json/object-get d 0 "next_cursor")
+              count (if (< at 0) 0 (json/child-count (json/token d at)))
+              (mut speech) (sb-new a)
+              (mut speaking) false
+              (mut done) false
+              (mut i) 0]
+          (loop (if (>= (load i) count)
+                    (break)
+                    (let [ev (json/array-nth d at (load i))
+                          kind (harness/doc-string d ev "event")
+                          payload (json/object-get d ev "payload")]
+                      (cond (= kind "model.response.delta")
+                              (when (>= payload 0)
+                                (sb-push-str! (mut speech)
+                                              (harness/unescape a
+                                                                (json/string-text d
+                                                                                  (json/token d payload))))
+                                (set! speaking true)
+                                0)
+                            (= kind "tool.call.proposed")
+                              (when (>= payload 0)
+                                (push-line! app
+                                            (mk-line (Tool) (harness/doc-string d payload "name") ""))
+                                0)
+                            (= kind "tool.call.completed")
+                              (push-line! app (mk-line (Result) "done" ""))
+                            (= kind "tool.call.failed")
+                              (push-line! app (mk-line (Result) "failed" ""))
+                            (= kind "run.completed") (do (set! done true) 0)
+                            (= kind "run.failed")
+                              (do
+                                ;; A run that fails carries the reason as its
+                                ;; payload. Swallowing it leaves the window
+                                ;; saying nothing happened, which is what it did
+                                ;; the first time this was tried.
+                                (when (>= payload 0)
+                                  (push-wrapped! app
+                                                 (Agent)
+                                                 (own-str a
+                                                          (harness/unescape a
+                                                                            (json/string-text d
+                                                                                              (json/token d payload))))
+                                                 52)
+                                  0)
+                                (set! done true)
+                                0)
+                            (= kind "model.request.failed")
+                              (when (>= payload 0)
+                                (push-line! app
+                                            (mk-line (Result)
+                                                     (harness/first-line
+                                                       (harness/unescape a
+                                                                         (json/string-text d
+                                                                                           (json/token d payload))))
+                                                     ""))
+                                0)
+                            :else 0)
+                      (set! i (+ (load i) 1)))))
+          (when (load speaking)
+            (push-wrapped! app (Agent) (own-str a (sb-str (load speech))) 52)
+            0)
+          (when (>= cursor 0)
+            (match (str-parse-int (json/number-text d (json/token d cursor)))
+              (Some [v] (set! (.agent-after app) v))
+              (None [] 0))
+            0)
+          (when (load done) (author-finished! app world a) 0)
+          0))))
+
+;; The agent said it was done. Whatever it wrote is on disk, so the library is
+;; re-read and the folder that was not there before becomes the open workflow.
+(defn author-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (set! (.agent-stage app) 0)
+  (set! (.running app) false)
+  (if (issue-composer? app) (backlog-finished! app world a) (workflow-finished! app world a)))
+
+;; Whatever it wrote is on disk. The backlog is re-read, and anything that was
+;; not there before is what this conversation produced.
+(defn backlog-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (set! (.issues world) (harness/discover-issues a (.root world)))
+  (rail-build! app world)
+  (let [n (al-len [harness/Issue] (.issues world))
+        (mut written) 0
+        (mut newest) -1
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (not (folder-known? world
+                                          (.file (al-elem [harness/Issue] (field world issues) (load i)))))
+                  (set! written (+ (load written) 1))
+                  (set! newest (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (if (= (load written) 0)
+        (do
+          (push-wrapped! app
+                         (Cont)
+                         "nothing written yet — keep talking, and it will write the issues when there is something worth recording"
+                         52)
+          0)
+        (do
+          (push-wrapped! app
+                         (Cont)
+                         (let [(mut said) (sb-new a)]
+                           (sb-push-str! (mut said) "wrote ")
+                           (sb-push-str! (mut said) (dec-str (load written)))
+                           (sb-push-str! (mut said) (if (= (load written) 1) " issue" " issues"))
+                           (sb-push-str! (mut said) " — they are in the rail, ready to run")
+                           (sb-finish! (mut said)))
+                         52)
+          0))))
+
+(defn workflow-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (set! (.flows world) (harness/discover a (.root world)))
+  (rail-build! app world)
+  (let [n (al-len [harness/Workflow] (.flows world))
+        (mut found) -1
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (not (folder-known? world
+                                          (.folder (al-elem [harness/Workflow]
+                                                            (field world flows)
+                                                            (load i)))))
+                  (set! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (if (>= (load found) 0)
+        (let [lines (al-len [Line] (.lines app))]
+          ;; Keep what was said; the graph is what changes.
+          (open-workflow-keeping-lines! app world (load found))
+          0)
+        ;; Nothing new: it may have edited the workflow already open, so reload
+        ;; that rather than claiming something happened.
+        (let [open (view-workflow app)]
+          (if (>= open 0)
+              (open-workflow-keeping-lines! app world open)
+              (do
+                (push-wrapped! app
+                               (Agent)
+                               "Nothing was written. Say more, or try a different provider with COIL_GUI_PROVIDER."
+                               52)
+                0))))))
+
+(defn folder-known? [(world (ptr World)) (folder (slice u8))] (-> bool)
+  (let [n (al-len [(slice u8)] (.before world))
+        (mut i) 0
+        (mut found) false]
+    (loop (if (or (>= (load i) n) (load found))
+              (break)
+              (do
+                (when (= (al-get [(slice u8)] (.before world) (load i)) folder)
+                  (store! found true)
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; Opening a workflow normally clears the conversation, which during authoring is
+;; the conversation that produced it. This keeps what was said and replaces only
+;; the steps.
+(defn open-workflow-keeping-lines! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
+  (let [kept (.lines app)]
+    (open-workflow! app world at)
+    (set! (.lines app) kept)
+    0))
+
+;; ---------------------------------------------------------------- running
+
+;; What Run would do, as a sentence, because the button says it and the code
+;; does it and they must be the same thing.
+(defn runnable? [(app (ptr App)) (world (ptr World))] (-> bool)
+  (and (>= (current-project app world) 0)
+       (or (>= (view-workflow app) 0) (>= (view-issue app) 0))))
+
+;; The newest run of this workflow anywhere, in milliseconds, or 0. A run that
+;; has just been started is recognised by being newer than this.
+(defn newest-run-of [(world (ptr World)) (workflow (slice u8))] (-> i64)
+  (let [n (al-len [harness/Run] (.runs world))
+        (mut i) 0
+        (mut newest) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [r (al-elem [harness/Run] (field world runs) (load i))]
+                (when (and (= (.workflow r) workflow) (> (.started r) (load newest)))
+                  (set! newest (.started r))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load newest)))
+
+;; Run means run: the harness starts the work in the current project, and the
+;; journal it writes is what this window then shows. A workflow runs as itself;
+;; an issue runs through the workflow its project declares, carrying the issue
+;; file as that run's context.
+(defn run-open! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (let [a (.alc app)
+        pi (current-project app world)]
+    (if (< pi 0)
+        0
+        (let [project (.name (project-at world pi))
+              wi (view-workflow app)
+              ii (view-issue app)]
+          (cond (>= wi 0)
+                  (let [wf (al-elem [harness/Workflow] (field world flows) wi)
+                        pid (harness/start-run! a (.root world) (.folder wf) project)]
+                    (println "run {s} in {s} · pid {d}" (.name wf) project pid)
+                    (set! (.run-pid app) pid)
+                    (await-run! app world (.name wf))
+                    0)
+                (>= ii 0)
+                  (let [issue (al-elem [harness/Issue] (field world issues) ii)
+                        at (if (>= (.chosen app) 0)
+                               (.chosen app)
+                               (issue-workflow-index world issue))]
+                    (if (< at 0)
+                        0
+                        (let [wf (al-elem [harness/Workflow] (field world flows) at)
+                              pid (harness/start-issue-run! a (.root world) (.folder wf) issue)]
+                          (println "issue {s} through {s} · pid {d}" (.title issue) (.name wf) pid)
+                          (set! (.run-pid app) pid)
+                          (await-run! app world (.name wf))
+                          0)))
+                :else 0)))))
+
+;; A run does not exist until the harness has written its first journal record,
+;; which is a moment away. Remember what to watch for; the poll opens it when it
+;; lands.
+(defn await-run! [(app (ptr App)) (world (ptr World)) (workflow (slice u8))] (-> i64)
+  (set! (.pending app) (own-str (.alc app) workflow))
+  (set! (.pending-after app) (newest-run-of world workflow))
+  (set! (.pending-since app) (.now app))
+  (set! (.running app) true)
+  (push-wrapped! app
+                 (Agent)
+                 (let [(mut said) (sb-new (.alc app))]
+                   (sb-push-str! (mut said) "Running ")
+                   (sb-push-str! (mut said) workflow)
+                   (sb-push-str! (mut said) " in ")
+                   (sb-push-str! (mut said) (.project-label app))
+                   (sb-finish! (mut said)))
+                 52)
+  0)
+
+;; A command that is not going to run says so on its own stderr within a moment.
+;; Showing that is the difference between "nothing happened" and a reason.
+(defn report-refusal! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> bool)
+  (let [text (harness/read-log a (.root world))]
+    (if (not (harness/log-is-refusal? text))
+        false
+        (do
+          (set! (.pending app) "")
+          (set! (.running app) false)
+          (push-wrapped! app (Agent) "The harness would not start it:" 52)
+          (push-wrapped! app (Agent) (harness/trim-spaces text) 52)
+          true))))
+
+;; Has the run we started appeared? Opening it is what switches this window from
+;; the thing you asked for to the thing that is happening.
+(defn claim-pending! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (if (= (slice-len [u8] (.pending app)) 0)
+      0
+      (let [n (al-len [harness/Run] (.runs world))
+            (mut found) -1
+            (mut i) 0]
+        (loop (if (>= (load i) n)
+                  (break)
+                  (let [r (al-elem [harness/Run] (field world runs) (load i))]
+                    (when (and (= (.workflow r) (.pending app))
+                               (> (.started r) (.pending-after app)))
+                      (store! found (load i))
+                      (break))
+                    (set! i (+ (load i) 1)))))
+        (if (< (load found) 0)
+            0
+            (do
+              (set! (.pending app) "")
+              (open-run! app world (load found))
+              (select-row! app (row-of-run app (load found)))
+              ;; The pid we are holding belongs to this run, now that we know
+              ;; which one it turned into.
+              (set! (.pid-run-id app)
+                    (own-str (.alc app)
+                             (.run-id (al-elem [harness/Run] (field world runs) (load found)))))
+              0)))))
+
+;; Can this window stop what is open? Only a run it started itself: a run from a
+;; terminal belongs to that terminal.
+(defn stoppable? [(app (ptr App)) (world (ptr World))] (-> bool)
+  (and (live-run? app world)
+       (and (> (.run-pid app) 0)
+            (let [run (al-elem [harness/Run] (field world runs) (view-run app))]
+              (and (= (.run-id run) (.pid-run-id app)) (dir/alive? (.run-pid app)))))))
+
+;; Stop it. SIGTERM to the harness process itself, then a marker beside the
+;; journal, because a killed run is not around to record its own ending and the
+;; rail would otherwise show it running forever.
+(defn stop-open-run! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (let [a (.alc app)
+        run (al-elem [harness/Run] (field world runs) (view-run app))]
+    (if (not (dir/terminate! (.run-pid app)))
+        (do (push-wrapped! app (Agent) "I could not stop it." 52) 0)
+        (do
+          (harness/mark-stopped! a run)
+          (set! (.run-pid app) -1)
+          (set! (.running app) false)
+          (push-wrapped! app (Cont) "stopped — the agent was killed where it stood" 52)
+          (world-refresh! world a)
+          (let [row (.selected app)]
+            (rail-build! app world)
+            (set! (.selected app) row))
+          0))))
+
+;; ---------------------------------------------------------------- selecting
+
+;; Text in the conversation is selectable, because the thing you most want out of
+;; this window is a line of it — an error, a path, a command — and a window you
+;; cannot copy out of makes you retype what it is already showing you.
+
+(defn select-begin! [(app (ptr App)) (px f64) (py f64)] (-> i64)
+  (let [at (convo-line-at app py)]
+    (if (< at 0)
+        (do (sel-clear! app) 0)
+        (sel-start! app at (convo-cell-at app at px)))))
+
+(defn select-drag! [(app (ptr App)) (px f64) (py f64)] (-> i64)
+  (if (not (.selecting app))
+      0
+      (let [at (convo-line-at app py)
+            line (if (>= at 0) at (convo-line-near app py))]
+        (if (< line 0)
+            0
+            (sel-extend! app line (convo-cell-at app line px))))))
+
+(defn select-end! [(app (ptr App))] (-> i64)
+  (set! (.selecting app) false)
+  0)
+
+;; The selected text, with a newline between lines. A wrapped paragraph is many
+;; lines here, so this is what was on screen rather than what was in the journal.
+(defn selection-text [(app (ptr App)) (a (ptr Allocator))] (-> (slice u8))
+  (if (not (sel-active? app))
+      ""
+      (let [first (sel-first-line app)
+            last (sel-last-line app)
+            n (al-len [Line] (.lines app))
+            (mut out) (sb-new a)
+            (mut i) first]
+        (loop (if (or (> (load i) last) (>= (load i) n))
+                  (break)
+                  (let [l (al-elem [Line] (field app lines) (load i))
+                        text (.text l)
+                        cells (text-cells text)
+                        from (if (= (load i) first) (sel-first-cell app) 0)
+                        to (if (= (load i) last) (sel-last-cell app) cells)
+                        lo (if (< from 0) 0 (if (> from cells) cells from))
+                        hi (if (< to lo) lo (if (> to cells) cells to))]
+                    (when (> hi lo)
+                      (sb-push-str! (mut out)
+                                    (substr text (prefix-bytes text lo) (prefix-bytes text hi)))
+                      0)
+                    (when (< (load i) last) (sb-push-byte! (mut out) (primitive/cast u8 10)) 0)
+                    (set! i (+ (load i) 1)))))
+        (sb-finish! (mut out)))))
+
+;; Onto the system pasteboard, so ⌘V works in any other application.
+(defn copy-selection! [(app (ptr App)) (a (ptr Allocator))] (-> i64)
+  (let [text (selection-text app a)]
+    (if (= (slice-len [u8] text) 0)
+        0
+        (let [board (msg (ptr i8) (objc-class c"NSPasteboard") (objc-sel c"generalPasteboard") [])
+              value
+                (msg (ptr i8)
+                     (objc-class c"NSString")
+                     (objc-sel c"stringWithUTF8String:")
+                     [(ptr i8)]
+                     (str->cstr a text))
+              kind
+                (msg (ptr i8)
+                     (objc-class c"NSString")
+                     (objc-sel c"stringWithUTF8String:")
+                     [(ptr i8)]
+                     c"public.utf8-plain-text")]
+          (msg i64 board (objc-sel c"clearContents") [])
+          (msg bool board (objc-sel c"setString:forType:") [(ptr i8) (ptr i8)] value kind)
+          (println "copied {d} bytes" (slice-len [u8] text))
+          0))))
+
+;; ---------------------------------------------------------------- clicking
 
 (defn click! [(app (ptr App))
               (cv (ptr Canvas))
-              (flows (ptr (ArrayList harness/Workflow)))
+              (world (ptr World))
               (px f64)
               (py f64)
               (w f64)
               (h f64)] (-> i64)
   (let [geom (alloc/stack Panes)]
     (set! geom (panes w h))
-    (cond (< py HEADER)
-            (if (not (run-hit cv app geom px py))
-                0
-                ;; Run means run: the harness starts the factory, and the journal it
-                ;; writes is what this window then shows.
-                (let [a (.alc app)
-                      at (.open app)]
-                  (if (< at 0)
-                      0
-                      (let [wf (al-elem [harness/Workflow] flows at)
-                            pid (harness/start-run! a (harness-root a) (.folder wf))]
-                        (println "started {s} · pid {d}" (.name wf) pid)
-                        (set! (.running app) true)
-                        0))))
+    ;; Anywhere but the conversation, a click is a command and any selection it
+    ;; leaves behind would only be stale.
+    (when (or (< px (.convo-x geom)) (< py HEADER)) (sel-clear! app) 0)
+    (cond
+          ;; The composer strip. A click here is not the start of a selection --
+          ;; there is nothing to select -- it is you saying "I am typing now",
+          ;; and the strip lights up to agree.
+          (and (> px (.convo-x geom)) (> py (- h (composer-height cv app (.convo geom)))))
+            (do (sel-clear! app) (set! (.composer-lit app) (.now app)) 0)
+          (and (> px (.convo-x geom)) (> py HEADER))
+            (select-begin! app px py)
+          (< py HEADER)
+            ;; One place in the header holds one control: Stop while a run this
+            ;; window started is going, Run otherwise.
+            (cond (stop-hit cv app geom px py) (stop-open-run! app world)
+                  (run-hit cv app geom px py) (run-open! app world)
+                  :else 0)
           (< px (.rail geom))
             (let [hit (rail-hit app py)]
               (if (< hit 0)
                   0
-                  (do
-                    (set! (.selected app) hit)
-                    (open-workflow! app flows (.source (al-elem [Item] (field app items) hit)))
-                    0)))
+                  (let [it (al-elem [Item] (field app items) hit)
+                        source (.source it)]
+                    (select-row! app hit)
+                    (cond (item-project? it) (open-project! app world source)
+                          (item-run? it) (open-run! app world source)
+                          (item-issue? it) (open-issue! app world source)
+                          (item-workflow? it) (open-workflow! app world source)
+                          :else 0))))
+          (and (< px (.convo-x geom)) (or (>= (view-project app) 0) (needs-input? app)))
+            ;; The middle pane asks a question and these are the answers: for a
+            ;; project, which workflow; for a workflow that works on an issue,
+            ;; which issue. Picking one pairs them, and Run runs the pair.
+            (let [wanted-issue (needs-input? app)
+                  chosen (view-workflow app)
+                  row (picker-hit app geom px py)]
+              (if (< row 0)
+                  0
+                  (let [it (al-elem [Item] (field app items) row)]
+                    (select-row! app row)
+                    (if wanted-issue
+                        (do
+                          (open-issue! app world (.source it))
+                          (set! (.chosen app) chosen)
+                          0)
+                        (open-workflow! app world (.source it))))))
           (< px (.convo-x geom))
             (let [hit (node-hit app geom px py)]
               (if (< hit 0)
@@ -344,7 +1136,7 @@
                     (set! (.focus app) hit)
                     ;; Selecting a step replays its own conversation out of the
                     ;; journal rather than filtering something already in memory.
-                    (harness/rebuild-lines! app)
+                    (when (>= (view-run app) 0) (harness/rebuild-lines! app) 0)
                     0)))
           :else 0)))
 
@@ -354,21 +1146,79 @@
     (let [in-rail (< px (.rail geom))
           in-graph (and (>= px (.rail geom)) (< px (.convo-x geom)))
           item (if (and in-rail (>= py HEADER)) (rail-hit app py) -1)
-          node (if in-graph (node-hit app geom px py) -1)
-          run (run-hit cv app geom px py)
-          composer (and (> px (.convo-x geom)) (> py (- h 52.0)))]
+          node
+            (if in-graph
+                (if (>= (view-project app) 0)
+                    (picker-hit app geom px py)
+                    (node-hit app geom px py))
+                -1)
+          run (or (run-hit cv app geom px py) (stop-hit cv app geom px py))
+          in-convo (and (> px (.convo-x geom)) (> py HEADER))
+          composer (and (> px (.convo-x geom)) (> py (- h (composer-height cv app (.convo geom)))))]
       (set! (.hover-item app) item)
       (set! (.hover-node app) node)
       (set! (.hover-run app) run)
       (let [name
               (cond (or (or (>= item 0) (>= node 0)) run) c"pointingHandCursor"
-                    composer c"IBeamCursor"
+                    (or composer in-convo) c"IBeamCursor"
                     :else c"arrowCursor")
             cursor (msg (ptr i8) (objc-class c"NSCursor") (objc-sel name) [])]
         (msg (ptr i8) cursor (objc-sel c"set") []))
       0)))
 
-(defn key! [(app (ptr App)) (flows (ptr (ArrayList harness/Workflow))) (ev (ptr i8)) (command bool)] (-> i64)
+;; What a keystroke does, separated from where it came from. The window hands it
+;; an NSEvent; a probe hands it the same bytes. Neither can drift from the other,
+;; which is the only way a keyboard path can be checked without a keyboard.
+(defn key-press! [(app (ptr App))
+                  (world (ptr World))
+                  (first i64)
+                  (bytes (slice u8))
+                  (command bool)
+                  (shift bool)] (-> i64)
+  ;; Typing lights the composer too: the first keystroke is the other way people
+  ;; find out where their words are going.
+  (when (and (not command) (>= first 32)) (set! (.composer-lit app) (.now app)) 0)
+  (if command
+      (cond (= first 113) (do (os/_exit 0) 0)
+            (= first 110) (new-workflow! app)
+            (= first 105) (new-issue! app world)
+            ;; ⌘C copies what is selected; ⌘A selects the whole conversation,
+            ;; which is the fast path for "give me that error".
+            (= first 99) (copy-selection! app (.alc app))
+            (= first 97) (sel-all! app)
+            ;; ⌘⏎ is the Run button. It starts the harness exactly as the button
+            ;; does; there is no second, private way to run something.
+            (or (= first 13) (= first 10))
+              (if (> (slice-len [u8] (run-label app)) 0)
+                  (do (run-open! app world) (rail-sync! app) 0)
+                  0)
+            :else 0)
+      (cond (or (= first 13) (= first 10))
+              ;; ⇧⏎ is a newline; ⏎ sends. A composer that cannot hold a
+              ;; paragraph makes you send three half-thoughts instead of one
+              ;; whole one.
+              (if shift
+                  (input-push! app (cast u8 10))
+                  (send! app world))
+            (= first 127) (input-backspace! app)
+            (= first 27) (input-clear! app)
+            (= first 9) (focus-next! app)
+            (>= first 32)
+              (let [n (slice-len [u8] bytes)
+                    (mut i) 0]
+                (loop (if (>= (load i) n)
+                          (break)
+                          (do
+                            (input-push! app (slice-get [u8] bytes (load i)))
+                            (store! i (+ (load i) 1)))))
+                0)
+            :else 0)))
+
+(defn key! [(app (ptr App))
+            (world (ptr World))
+            (ev (ptr i8))
+            (command bool)
+            (shift bool)] (-> i64)
   (set! (field app typed) (.now app))
   (let [chars (msg (ptr i8) ev (objc-sel c"characters") [])]
     (if (null? chars)
@@ -376,29 +1226,12 @@
         (let [utf (msg (ptr i8) chars (objc-sel c"UTF8String") [])
               n (strlen utf)
               first (primitive/cast i64 (load (primitive/cast (ptr u8) utf)))]
-          (if command
-              (cond (= first 113) (do (os/_exit 0) 0)
-                    (= first 110) (new-workflow! app)
-                    (or (= first 13) (= first 10))
-                      (if (and (> (step-count app) 0) (not (started? app)))
-                          (do (run-start! app) (rail-sync! app) 0)
-                          0)
-                    :else 0)
-              (cond (or (= first 13) (= first 10)) (send! app flows)
-                    (= first 127) (input-backspace! app)
-                    (= first 27) (input-clear! app)
-                    (= first 9) (focus-next! app)
-                    (>= first 32)
-                      (let [(mut i) 0]
-                        (loop (if (>= (load i) n)
-                                  (break)
-                                  (do
-                                    (input-push! app
-                                                 (load (primitive/index (primitive/cast (ptr u8) utf)
-                                                                        (load i))))
-                                    (store! i (+ (load i) 1)))))
-                        0)
-                    :else 0))))))
+          (key-press! app
+                      world
+                      first
+                      (slice-new [u8] (primitive/cast (ptr u8) utf) n)
+                      command
+                      shift)))))
 
 ;; ---------------------------------------------------------------- window
 
@@ -428,7 +1261,7 @@
 (defn pump! [(nsapp (ptr i8))
              (app (ptr App))
              (cv (ptr Canvas))
-             (flows (ptr (ArrayList harness/Workflow)))
+             (world (ptr World))
              (mode (ptr i8))
              (w f64)
              (h f64)] (-> i64)
@@ -445,11 +1278,19 @@
               (break)
               (let [ty (msg i64 ev (objc-sel c"type") [])
                     flags (msg i64 ev (objc-sel c"modifierFlags") [])
-                    command (!= (primitive/iand flags 1048576) 0)]
+                    command (!= (primitive/iand flags 1048576) 0)
+                    ;; NSEventModifierFlagShift
+                    shift (!= (primitive/iand flags 131072) 0)]
                 (when (= ty 1)
                   (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
-                    (click! app cv flows (.x p) (- h (.y p)) w h))
+                    (click! app cv world (.x p) (- h (.y p)) w h))
                   0)
+                ;; A drag extends the selection; a release ends it.
+                (when (= ty 6)
+                  (let [p (msg CGPoint ev (objc-sel c"locationInWindow") [])]
+                    (select-drag! app (.x p) (- h (.y p))))
+                  0)
+                (when (= ty 2) (select-end! app) 0)
                 ;; Scroll wheel: only the conversation scrolls, and only when the
                 ;; pointer is over it.
                 (when (= ty 22)
@@ -473,7 +1314,7 @@
                 ;; chain. Nothing there handles it, and an unhandled key event is
                 ;; precisely what makes AppKit beep on every keystroke.
                 (if (= ty 10)
-                    (key! app flows ev command)
+                    (key! app world ev command shift)
                     (if (= ty 11)
                         0
                         (do (msg (ptr i8) nsapp (objc-sel c"sendEvent:") [(ptr i8)] ev) 0)))
@@ -494,8 +1335,7 @@
                [(ptr i8)]
                c"kCFRunLoopDefaultMode")
         title (msg (ptr i8) (objc-class c"NSString") (objc-sel c"stringWithUTF8String:") [(ptr i8)] c"coil")
-        root (harness-root a)
-        (mut flows) (harness/discover a root "harness")
+        world (alloc/stack World)
         ;; The live drawing surface. It is rebuilt whenever the window changes
         ;; size, which is the only reason any of this is mutable.
         (mut ctx) (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
@@ -503,12 +1343,17 @@
         (mut cur-h) 0.0
         (mut cur-scale) 0.0]
     (app-init! app a)
-    (rail-build! app (mut flows))
-    (println "harness root {s} · {d} workflows" root (al-len [harness/Workflow] (load flows)))
-    (when (> (al-len [harness/Workflow] (load flows)) 0)
-      (set! (.selected app) 1)
-      (open-workflow! app (mut flows) 0)
-      0)
+    (world-load! world a)
+    (rail-build! app world)
+    (println "harness root {s} · {d} projects · {d} workflows · {d} runs · {d} issues"
+             (.root world)
+             (project-count world)
+             (al-len [harness/Workflow] (.flows world))
+             (al-len [harness/Run] (.runs world))
+             (al-len [harness/Issue] (.issues world)))
+    ;; Open on the first project: the window starts where the work is, not on
+    ;; whatever workflow happens to be first in a directory listing.
+    (start-here! app world)
     (if (= (canvas-init cv (load ctx) (cast f64 HEIGHT) 2.0) 1)
         (do (println "fonts failed to load — run from the project root") 1)
         (do
@@ -553,33 +1398,13 @@
                         (set! cur-h h)
                         (set! cur-scale scale)
                         0)
-                      (pump! nsapp app cv (mut flows) mode w h)
-                      ;; While a run is live, ask twice a second whether its
-                      ;; journal grew — a size check, not a re-read — and only
-                      ;; rebuild when it did. Rebuilding on a timer is what made
-                      ;; the text churn.
-                      (when (and (.running app) (>= (.open app) 0))
-                        (when (= (% (load frame) 30) 29)
-                          (let [wf (al-elem [harness/Workflow] (mut flows) (.open app))]
-                            (when (harness/journal-changed? a root wf)
-                              (let [was-done (.done wf)]
-                                (set! (.anchor app) (.scroll-max app))
-                                (harness/refresh! a root wf)
-                                (harness/load-into! app wf)
-                                (harness/rebuild-lines! app)
-                                ;; The rail only changes when a step finished, so
-                                ;; leave it alone the rest of the time.
-                                (when (!= (.done wf) was-done)
-                                  (rail-build! app (mut flows))
-                                  0)
-                                0)
-                              0)
-                            ;; A finished factory has nothing left to report.
-                            (when (harness/run-finished? app)
-                              (set! (.running app) false)
-                              0)
-                            0)
-                          0)
+                      (pump! nsapp app cv world mode w h)
+                      ;; Twice a second, ask what changed — a size check rather
+                      ;; than a re-read, and only then a rebuild. Polling on a
+                      ;; timer is what made the text churn.
+                      (when (and (or (.running app) (> (.agent-stage app) 0))
+                                 (= (% (load frame) 30) 29))
+                        (poll! app world a)
                         0)
                       (draw-app! cv app w h)
                       (blit! (load ctx) layer)
@@ -587,49 +1412,195 @@
                     (set! frame (+ (load frame) 1))
                     (usleep 16000))))
           0))))
+;; Where the window opens: the first project, so the first thing on screen is a
+;; place with work in it rather than a definition with none.
+(defn start-here! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (if (= (project-count world) 0)
+      (do
+        (set! (.title app) "no projects")
+        (push-wrapped! app
+                       (Agent)
+                       "No projects are declared. Add one to ~/.coil-agent-harness/projects.json — a name and the path to a checkout — and it will appear here."
+                       52)
+        0)
+      (do
+        (open-project! app world 0)
+        (select-row! app 0)
+        (project-label-sync! app world)
+        0)))
+
+(defn project-label-sync! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (set! (.project-label app) (current-project-label app world))
+  (set! (.can-stop app) (stoppable? app world))
+  0)
+
+;; What changed on disk while a run is live: the run we are waiting for may have
+;; appeared, and the run we are watching may have grown.
+(defn poll! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  ;; An authoring conversation and a run are never both in flight: ⌘N is its own
+  ;; screen, and Run is not reachable from it.
+  (if (> (.agent-stage app) 0)
+      (cond (= (.agent-stage app) 1)
+              (if (agent-service-ready? app world a)
+                  (agent-post! app world a)
+                  0)
+            (= (.agent-stage app) 2) (agent-poll! app world a)
+            :else 0)
+      (poll-run! app world a)))
+
+(defn poll-run! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+  (if (> (slice-len [u8] (.pending app)) 0)
+      (do
+        (world-refresh! world a)
+        (rail-build! app world)
+        (claim-pending! app world)
+        ;; Still nothing after a moment? Then the command printed its reason
+        ;; instead of a journal, and that reason belongs on screen.
+        (when (and (> (slice-len [u8] (.pending app)) 0)
+                   (> (- (.now app) (.pending-since app)) 1.5))
+          (report-refusal! app world a)
+          0)
+        0)
+      (let [at (view-run app)]
+        (if (< at 0)
+            (do (set! (.running app) false) 0)
+            (let [run (al-elem [harness/Run] (field world runs) at)]
+              (when (harness/journal-changed? a run)
+                (let [was-done (.done run)]
+                  (set! (.anchor app) (.scroll-max app))
+                  (harness/refresh-run! a (field world projects) run)
+                  (harness/load-run! app
+                                     run
+                                     (let [wi (harness/workflow-index (field world flows)
+                                                                      (.workflow run))]
+                                       (if (< wi 0)
+                                           (al-new [(slice u8)] (.alc app))
+                                           (.workers (al-elem [harness/Workflow]
+                                                              (field world flows)
+                                                              wi)))))
+                  (harness/rebuild-lines! app)
+                  ;; The rail only changes when a step finished, so leave it
+                  ;; alone the rest of the time.
+                  (when (!= (.done run) was-done)
+                    (let [row (.selected app)]
+                      (rail-build! app world)
+                      (set! (.selected app) row))
+                    0)
+                  0)
+                0)
+              ;; A finished factory has nothing left to report.
+              (when (harness/run-finished? app)
+                (set! (.running app) false)
+                0)
+              0)))))
+
 (defn render-real [(which i64) (w f64) (h f64) (back f64)] (-> i64)
+  (render-shot "run" which w h back))
+
+;; One PNG of the real window, with one thing open: a run, a workflow, an issue,
+;; or a project. Every scene this app can be reviewed in comes off disk.
+(defn render-shot [(what (slice u8)) (which i64) (w f64) (h f64) (back f64)] (-> i64)
   (let [a (malloc-allocator)
         app (alloc/stack App)
         cv (alloc/stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (cast i64 (* w 2.0)) (cast i64 (* h 2.0)) 8 0 space 1)
-        root (harness-root a)
-        (mut flows) (harness/discover a root "harness")
-        n (al-len [harness/Workflow] (load flows))]
+        world (alloc/stack World)]
     (app-init! app a)
-    (rail-build! app (mut flows))
-    (println "harness root {s} · {d} workflows" root n)
-    (if (= n 0)
-        (do (println "no factories found — is COIL_HARNESS_ROOT right?") 1)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (cond (= what "run") (do (open-run! app world which) (select-row! app (row-of-run app which)) 0)
+          (= what "issue") (do (open-issue! app world which) (select-row! app (row-of-issue app which)) 0)
+          (= what "workflow")
+            (do
+              (open-workflow! app world which)
+              (let [rows (al-len [Item] (.items app))
+                    (mut row) 0]
+                (loop (if (>= (load row) rows)
+                          (break)
+                          (let [it (al-elem [Item] (field app items) (load row))]
+                            (if (and (item-workflow? it) (= (.source it) which))
+                                (do (select-row! app (load row)) (break))
+                                (set! row (+ (load row) 1)))))))
+              0)
+          (= what "project") (do (open-project! app world which) (select-row! app 0) 0)
+          :else 0)
+    (project-label-sync! app world)
+    (if (= (canvas-init cv ctx h 2.0) 1)
+        (do (println "fonts failed to load") 1)
         (do
-          (let [(mut i) 0]
-            (loop (if (>= (load i) n)
-                      (break)
-                      (let [w (al-elem [harness/Workflow] (mut flows) (load i))]
-                        (println "  {s}  {d} steps  {d} done  {d} bytes"
-                                 (.name w)
-                                 (al-len [(slice u8)] (.workers w))
-                                 (.done w)
-                                 (.bytes w))
-                        (set! i (+ (load i) 1))))))
-          (set! (.selected app) (+ which 1))
-          (open-workflow! app (mut flows) which)
-          (if (= (canvas-init cv ctx h 2.0) 1)
-              (do (println "fonts failed to load") 1)
-              (do
-                ;; Draw once to publish the scroll limit, scroll, then draw for
-                ;; real: the limit is a property of the laid-out content.
-                (draw-app! cv app w h)
-                (when (> back 0.0) (scroll-by! app back) 0)
-                (draw-app! cv app w h)
-                (println "scroll={d} of {d}"
-                         (cast i64 (.scroll app))
-                         (cast i64 (.scroll-max app)))
-                (write-png ctx c"real.png")
-                (println "wrote real.png · {d} steps · {d} lines"
-                         (step-count app)
-                         (al-len [Line] (.lines app)))
-                0))))))
+          ;; Draw once to publish the scroll limit, scroll, then draw for real:
+          ;; the limit is a property of the laid-out content.
+          (draw-app! cv app w h)
+          (when (> back 0.0) (scroll-by! app back) 0)
+          (draw-app! cv app w h)
+          (write-png ctx c"real.png")
+          (println "wrote real.png · {s} {d} · {d} steps · {d} lines"
+                   what
+                   which
+                   (step-count app)
+                   (al-len [Line] (.lines app)))
+          0))))
+
+;; Everything the rail is built from, without a window: the projects, what has
+;; run in each, what is filed against them, and the library you can run in any
+;; of them. This is the whole app except for the pixels.
+(defn rail-probe [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (println "root {s} · service port {d}" (.root world) (.port (field world svc)))
+    (let [n (project-count world)
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [p (project-at world (load i))]
+                  (println "project {s} · {s} · issues run with {s}"
+                           (.name p)
+                           (.path p)
+                           (.issue-workflow p))
+                  (set! i (+ (load i) 1))))))
+    (let [n (al-len [harness/Run] (.runs world))
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [r (al-elem [harness/Run] (field world runs) (load i))]
+                  (println "run {s} in {s} · {d}/{d} · {s}"
+                           (.workflow r)
+                           (.project r)
+                           (.done r)
+                           (.total r)
+                           (state-word (.state r)))
+                  (set! i (+ (load i) 1))))))
+    (let [n (al-len [harness/Issue] (.issues world))
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [issue (al-elem [harness/Issue] (field world issues) (load i))]
+                  (println "issue {d} [{s}] {s}" (load i) (.project issue) (.title issue))
+                  (set! i (+ (load i) 1))))))
+    (let [n (al-len [Item] (.items app))
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [it (al-elem [Item] (field app items) (load i))]
+                  (println "row {d}: {s} {s} {s}"
+                           (load i)
+                           (cond (item-project? it) "▸ project"
+                                 (item-library? it) "▸ library"
+                                 (item-run? it) "  run    "
+                                 (item-issue? it) "  issue  "
+                                 (item-workflow? it) "  flow   "
+                                 :else "  ·      ")
+                           (if (item-heading? it) (.project it) (.name it))
+                           (.meta it))
+                  (set! i (+ (load i) 1))))))
+    0))
 
 ;; Drives the real click path headlessly at a given point, so hit testing can be
 ;; separated from event delivery when a click "does nothing".
@@ -639,45 +1610,29 @@
         cv (alloc/stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        root (harness-root a)
-        (mut flows) (harness/discover a root "harness")]
+        world (alloc/stack World)]
     (app-init! app a)
-    (rail-build! app (mut flows))
+    (world-load! world a)
+    (rail-build! app world)
     (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
-    (open-workflow! app (mut flows) 0)
-    (println "before: selected={d} open={d} focus={d} title={s} steps={d} lines={d}"
+    (start-here! app world)
+    (println "before: selected={d} title={s} steps={d} project={s}"
              (.selected app)
-             (.open app)
-             (.focus app)
              (.title app)
              (step-count app)
-             (al-len [Line] (.lines app)))
-    (println "rail-hit({d}) = {d}"
-             (primitive/cast i64 py)
-             (rail-hit app py))
-    (let [geom (alloc/stack Panes)]
-      (set! geom (panes (cast f64 WIDTH) (cast f64 HEIGHT)))
-      (println "node-hit = {d}" (node-hit app geom px py)))
-    (let [hit (rail-hit app py)]
-      (when (>= hit 0)
-        (let [it (al-elem [Item] (field app items) hit)]
-          (println "  item {d}: name={s} source={d} head={d}"
-                   hit
-                   (.name it)
-                   (.source it)
-                   (if (.head it) 1 0)))
-        0))
-    (println "items={d} flows={d}"
-             (al-len [Item] (.items app))
-             (al-len [harness/Workflow] (load flows)))
-    (click! app cv (mut flows) px py (cast f64 WIDTH) (cast f64 HEIGHT))
-    (println "after:  selected={d} open={d} focus={d} title={s} steps={d} lines={d}"
+             (.project-label app))
+    (println "rail-hit({d}) = {d}" (primitive/cast i64 py) (rail-hit app py))
+    (click! app cv world px py (cast f64 WIDTH) (cast f64 HEIGHT))
+    (project-label-sync! app world)
+    (println "after:  selected={d} title={s} steps={d} project={s} run={d} flow={d} issue={d}"
              (.selected app)
-             (.open app)
-             (.focus app)
              (.title app)
              (step-count app)
-             (al-len [Line] (.lines app)))
+             (.project-label app)
+             (view-run app)
+             (view-workflow app)
+             (view-issue app))
+    (println "run button: {s}" (run-label app))
     0))
 
 ;; Proves the spawn path without starting an agent run, which costs money and
@@ -688,24 +1643,672 @@
     (println "spawned pid {d}" pid)
     0))
 
-;; Drives the authoring path headlessly: type a sentence into an empty
-;; conversation and see what lands on disk.
+;; What Run would execute, without executing it: pick a workflow in the library,
+;; and print the command it would run in the current project.
+(defn run-probe [(which i64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-workflow! app world which)
+    (project-label-sync! app world)
+    (if (< (current-project app world) 0)
+        (do (println "no projects declared") 1)
+        (let [wf (al-elem [harness/Workflow] (field world flows) which)]
+          (println "button: {s}" (run-label app))
+          (println "would run: {s}"
+                   (harness/run-command a
+                                        (.root world)
+                                        (.folder wf)
+                                        (current-project-name app world)))
+          0))))
+
+;; Drives the authoring path headlessly: ⌘N, type, ⏎, and then the same poll the
+;; window runs, until the agent has finished and the library has changed.
 (defn author-probe [(text (slice u8))] (-> i64)
   (let [a (malloc-allocator)
         app (alloc/stack App)
-        root (harness-root a)
-        (mut flows) (harness/discover a root "harness")]
+        world (alloc/stack World)]
     (app-init! app a)
-    (rail-build! app (mut flows))
-    (println "root {s} · {d} workflows before" root (al-len [harness/Workflow] (load flows)))
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (new-workflow! app)
+    (set! (.now app) (CACurrentMediaTime))
+    (println "{d} workflows before · provider {s} · model {s}"
+             (al-len [harness/Workflow] (.flows world))
+             (author-provider a)
+             (author-model a))
     (set-input! app text)
-    (send! app (mut flows))
-    (println "after: {d} workflows · open={d} title={s} steps={d} lines={d}"
-             (al-len [harness/Workflow] (load flows))
-             (.open app)
-             (.title app)
-             (step-count app)
-             (al-len [Line] (.lines app)))
+    (send! app world)
+    (let [(mut ticks) 0
+          (mut said) 0]
+      (loop (if (or (>= (load ticks) 600) (= (.agent-stage app) 0))
+                (break)
+                (do
+                  (usleep 500000)
+                  (set! (.now app) (CACurrentMediaTime))
+                  (poll! app world a)
+                  ;; Print what arrived since the last tick, so a long call shows
+                  ;; progress instead of looking hung.
+                  (let [n (al-len [Line] (.lines app))]
+                    (loop (if (>= (load said) n)
+                              (break)
+                              (do
+                                (println "  | {s}"
+                                         (.text (al-elem [Line] (field app lines) (load said))))
+                                (set! said (+ (load said) 1))))))
+                  (set! ticks (+ (load ticks) 1))))))
+    (println "after: {d} workflows · open flow {d} · steps {d}"
+             (al-len [harness/Workflow] (.flows world))
+             (view-workflow app)
+             (step-count app))
+    (when (>= (view-workflow app) 0)
+      (let [wf (al-elem [harness/Workflow] (field world flows) (view-workflow app))]
+        (println "wrote {s}" (.folder wf))
+        (let [n (al-len [(slice u8)] (.workers wf))
+              (mut i) 0]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (do
+                      (println "  step {d}: {s}"
+                               (+ (load i) 1)
+                               (al-get [(slice u8)] (.workers wf) (load i)))
+                      (set! i (+ (load i) 1))))))
+        0))
+    0))
+
+;; Presses Run on a workflow and waits, exactly as the window does: spawn, poll,
+;; and either open the run that appeared or report why there is not one. This is
+;; the whole running path with no window and no keystroke.
+(defn run-now-probe [(which i64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-workflow! app world which)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (run-open! app world)
+    (println "pending {s}" (.pending app))
+    (let [(mut tries) 0]
+      (loop (if (or (>= (load tries) 40)
+                    (or (>= (view-run app) 0) (= (slice-len [u8] (.pending app)) 0)))
+                (break)
+                (do
+                  (usleep 250000)
+                  (set! (.now app) (CACurrentMediaTime))
+                  (poll! app world a)
+                  (set! tries (+ (load tries) 1))))))
+    (if (< (view-run app) 0)
+        (do
+          (println "no run appeared · what the pane says:")
+          (let [n (al-len [Line] (.lines app))
+                (mut i) 0]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (do
+                        (println "  {s}" (.text (al-elem [Line] (field app lines) (load i))))
+                        (set! i (+ (load i) 1))))))
+          1)
+        (let [r (al-elem [harness/Run] (field world runs) (view-run app))]
+          (println "opened run: {s} in {s} · {d}/{d} · {s}"
+                   (.workflow r)
+                   (.project r)
+                   (.done r)
+                   (.total r)
+                   (state-word (.state r)))
+          (println "journal {s}" (.journal r))
+          (println "steps {d} · lines {d}" (step-count app) (al-len [Line] (.lines app)))
+          ;; Keep polling while it finishes, the way the window does.
+          (let [(mut tries) 0]
+            (loop (if (or (>= (load tries) 20) (not (.running app)))
+                      (break)
+                      (do
+                        (usleep 250000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! tries (+ (load tries) 1))))))
+          (println "finished: running={d} · {d} done of {d} steps"
+                   (if (.running app) 1 0)
+                   (count-in-state app "done")
+                   (step-count app))
+          0))))
+
+;; Drags across the conversation and prints what would land on the pasteboard.
+;; Selection is geometry, so this draws first: the lines have to know where they
+;; were put before anything can ask what is under a point.
+(defn select-probe [(x1 f64) (y1 f64) (x2 f64) (y2 f64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+    (when (> (al-len [harness/Run] (.runs world)) 0)
+      (open-run! app world 0)
+      0)
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (println "{d} lines drawn" (al-len [Line] (.lines app)))
+    (let [n (al-len [Line] (.lines app))
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [l (al-elem [Line] (field app lines) (load i))]
+                  (println "  line {d}: top={d} left={d} adv={d} [{s}]"
+                           (load i)
+                           (cast i64 (.top l))
+                           (cast i64 (.left l))
+                           (cast i64 (* 100.0 (.adv l)))
+                           (.text l))
+                  (set! i (+ (load i) 1))))))
+    (select-begin! app x1 y1)
+    (select-drag! app x2 y2)
+    (select-end! app)
+    (println "selection: line {d} cell {d} -> line {d} cell {d}"
+             (.sel-line app)
+             (.sel-cell app)
+             (.sel-head-line app)
+             (.sel-head-cell app))
+    (println "text: [{s}]" (selection-text app a))
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (write-png ctx c"real.png")
+    0))
+
+;; The whole talking-to-a-run path without a window: start a workflow, wait for
+;; it to be going, say something into it, and watch what it does next.
+(defn say-probe [(which i64) (text (slice u8))] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-workflow! app world which)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (run-open! app world)
+    (let [(mut ticks) 0]
+      (loop (if (or (>= (load ticks) 60) (>= (view-run app) 0))
+                (break)
+                (do
+                  (usleep 500000)
+                  (set! (.now app) (CACurrentMediaTime))
+                  (poll! app world a)
+                  (set! ticks (+ (load ticks) 1))))))
+    (if (< (view-run app) 0)
+        (do (println "no run to talk to") 1)
+        (let [run (al-elem [harness/Run] (field world runs) (view-run app))]
+          (println "run {s} · id {s} · live {d}"
+                   (.workflow run)
+                   (.run-id run)
+                   (if (live-run? app world) 1 0))
+          ;; Let it get going, the way a person would watch for a moment first.
+          (let [(mut ticks) 0]
+            (loop (if (>= (load ticks) 30)
+                      (break)
+                      (do
+                        (usleep 500000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! ticks (+ (load ticks) 1))))))
+          (set-input! app text)
+          (send! app world)
+          (println "said: {s}" text)
+          (let [(mut ticks) 0]
+            (loop (if (or (>= (load ticks) 120) (not (.running app)))
+                      (break)
+                      (do
+                        (usleep 500000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! ticks (+ (load ticks) 1))))))
+          (println "--- conversation as the window shows it ---")
+          (let [n (al-len [Line] (.lines app))
+                (mut i) (if (> n 24) (- n 24) 0)]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (do
+                        (println "  {s}" (.text (al-elem [Line] (field app lines) (load i))))
+                        (set! i (+ (load i) 1))))))
+          0))))
+
+;; Starts a workflow and then stops it, the way the header button does.
+(defn stop-probe [(which i64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-workflow! app world which)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (run-open! app world)
+    (let [(mut ticks) 0]
+      (loop (if (or (>= (load ticks) 60) (>= (view-run app) 0))
+                (break)
+                (do
+                  (usleep 500000)
+                  (set! (.now app) (CACurrentMediaTime))
+                  (poll! app world a)
+                  (set! ticks (+ (load ticks) 1))))))
+    (if (< (view-run app) 0)
+        (do (println "no run appeared") 1)
+        (do
+          ;; Let it get going first, the way a person would.
+          (let [(mut ticks) 0]
+            (loop (if (>= (load ticks) 20)
+                      (break)
+                      (do
+                        (usleep 500000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! ticks (+ (load ticks) 1))))))
+          (project-label-sync! app world)
+          (println "pid {d} · stoppable {d} · button [{s}]"
+                   (.run-pid app)
+                   (if (.can-stop app) 1 0)
+                   (stop-label app))
+          (if (not (.can-stop app))
+              (do (println "nothing to stop") 1)
+              (do
+                ;; Click it, rather than calling what it calls: the button's
+                ;; position and the hit test have to agree, and that is exactly
+                ;; the kind of thing that drifts.
+                (let [cv (alloc/stack Canvas)
+                      space (CGColorSpaceCreateDeviceRGB)
+                      ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+                      geom (alloc/stack Panes)]
+                  (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+                  (set! geom (panes (cast f64 WIDTH) (cast f64 HEIGHT)))
+                  (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+                  (let [label (stop-label app)
+                        w (+ (text-width (field cv f11) label) 24.0)
+                        ;; Stop lives in the right-hand pane's header now.
+                        right (- (.w geom) GUTTER_PANE)
+                        px (- right (/ w 2.0))]
+                    (println "clicking Stop at {d},24 · label [{s}]"
+                             (cast i64 px)
+                             label)
+                    (click! app cv world px 24.0 (cast f64 WIDTH) (cast f64 HEIGHT))))
+                (usleep 1000000)
+                (println "after: alive {d} · state {s}"
+                         (if (dir/alive? (.run-pid app)) 1 0)
+                         (state-word (.state (al-elem [harness/Run]
+                                                      (field world runs)
+                                                      (view-run app)))))
+                0))))))
+
+;; Types at the window without a keyboard: the same function the NSEvent path
+;; calls, with the same bytes. Every keystroke this app claims to handle is
+;; exercised here, including the one that leaves the process -- the clipboard.
+(defn type-text! [(app (ptr App)) (world (ptr World)) (text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [byte (slice-get [u8] text (load i))]
+                (key-press! app
+                            world
+                            (primitive/cast i64 byte)
+                            (subslice [u8] text (load i) (+ (load i) 1))
+                            false
+                            false)
+                (set! i (+ (load i) 1)))))
+    0))
+
+(defn pasteboard-text [(a (ptr Allocator))] (-> (slice u8))
+  (let [board (msg (ptr i8) (objc-class c"NSPasteboard") (objc-sel c"generalPasteboard") [])
+        kind
+          (msg (ptr i8)
+               (objc-class c"NSString")
+               (objc-sel c"stringWithUTF8String:")
+               [(ptr i8)]
+               c"public.utf8-plain-text")
+        value (msg (ptr i8) board (objc-sel c"stringForType:") [(ptr i8)] kind)]
+    (if (null? value)
+        ""
+        (let [utf (msg (ptr i8) value (objc-sel c"UTF8String") [])]
+          (if (null? utf) "" (own-str a (cstr->str utf)))))))
+
+(defn keys-probe [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        world (alloc/stack World)
+        (mut failures) 0]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+    (start-here! app world)
+    (project-label-sync! app world)
+
+    ;; ⌘N: a new workflow, no project, empty composer.
+    (key-press! app world 110 "n" true false)
+    (if (and (view-nothing? app) (not (issue-composer? app)))
+        (do (println "ok   ⌘N opens an empty workflow composer") 0)
+        (do (println "FAIL ⌘N did not open the workflow composer") (set! failures (+ (load failures) 1)) 0))
+
+    ;; Typing, backspace, escape.
+    (type-text! app world "tidy the readmeX")
+    (key-press! app world 127 "" false false)
+    (if (= (input-slice app) "tidy the readme")
+        (do (println "ok   typing and backspace reach the composer") 0)
+        (do
+          (println "FAIL composer holds [{s}]" (input-slice app))
+          (set! failures (+ (load failures) 1))
+          0))
+    (key-press! app world 27 "" false false)
+    (if (= (slice-len [u8] (input-slice app)) 0)
+        (do (println "ok   escape clears it") 0)
+        (do (println "FAIL escape did not clear the composer") (set! failures (+ (load failures) 1)) 0))
+
+    ;; ⇧⏎ makes a new line; ⏎ sends. A paragraph has to be possible.
+    (key-press! app world 110 "n" true false)
+    (type-text! app world "first line")
+    (key-press! app world 13 "" false true)
+    (type-text! app world "second line")
+    (if (= (input-slice app) "first line\nsecond line")
+        (do (println "ok   ⇧⏎ makes a new line") 0)
+        (do
+          (println "FAIL composer holds [{s}]" (input-slice app))
+          (set! failures (+ (load failures) 1))
+          0))
+    (let [cv2 (alloc/stack Canvas)
+          space2 (CGColorSpaceCreateDeviceRGB)
+          ctx2 (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space2 1)]
+      (canvas-init cv2 ctx2 (primitive/cast f64 HEIGHT) 2.0)
+      (if (> (composer-height cv2 app 620.0) (composer-height cv2 app 620.0))
+          0
+          0)
+      ;; Two lines of input make a taller strip than none.
+      (let [tall (composer-height cv2 app 620.0)]
+        (input-clear! app)
+        (let [short (composer-height cv2 app 620.0)]
+          (if (> tall short)
+              (do (println "ok   the composer grows with what is in it") 0)
+              (do
+                (println "FAIL composer stayed {d} tall" (cast i64 tall))
+                (set! failures (+ (load failures) 1))
+                0)))))
+    (key-press! app world 27 "" false false)
+
+    ;; ⌘I: an issue, in the current project.
+    (key-press! app world 105 "i" true false)
+    (if (and (issue-composer? app) (> (slice-len [u8] (.project-label app)) 0))
+        (do (println "ok   ⌘I files against {s}" (.project-label app)) 0)
+        (do (println "FAIL ⌘I did not open an issue composer") (set! failures (+ (load failures) 1)) 0))
+
+    ;; A run with a transcript, so there is something to select and copy.
+    (key-press! app world 27 "" false false)
+    (if (= (al-len [harness/Run] (.runs world)) 0)
+        (do (println "skip no run on disk to select text from") 0)
+        (do
+          (open-run! app world 0)
+          (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+          (key-press! app world 97 "a" true false)
+          (if (sel-active? app)
+              (do (println "ok   ⌘A selects the conversation ({d} lines)" (al-len [Line] (.lines app))) 0)
+              (do (println "FAIL ⌘A selected nothing") (set! failures (+ (load failures) 1)) 0))
+          (key-press! app world 99 "c" true false)
+          (let [copied (pasteboard-text a)
+                wanted (selection-text app a)]
+            (if (and (> (slice-len [u8] copied) 0) (= copied wanted))
+                (do (println "ok   ⌘C put {d} bytes on the system pasteboard" (slice-len [u8] copied)) 0)
+                (do
+                  (println "FAIL pasteboard holds {d} bytes, selection is {d}"
+                           (slice-len [u8] copied)
+                           (slice-len [u8] wanted))
+                  (set! failures (+ (load failures) 1))
+                  0)))
+          0))
+    (println "--- {d} failures" (load failures))
+    (load failures)))
+
+;; Drags across the conversation through the same entry points the mouse uses:
+;; click! for the press, select-drag! for the movement, select-end! for the
+;; release. Nothing here reaches past what an event delivers.
+(defn mouse-probe [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        world (alloc/stack World)
+        (mut failures) 0]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+    (start-here! app world)
+    (if (= (al-len [harness/Run] (.runs world)) 0)
+        (do (println "skip no run on disk") 0)
+        (do
+          (open-run! app world 0)
+          (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+          ;; Find a line that was actually drawn and drag across it.
+          (let [n (al-len [Line] (.lines app))
+                (mut at) -1
+                (mut i) 0]
+            (loop (if (or (>= (load i) n) (>= (load at) 0))
+                      (break)
+                      (let [l (al-elem [Line] (field app lines) (load i))]
+                        ;; A line you could actually point at: visible, and long
+                        ;; enough to drag across.
+                        (when (and (line-visible? l) (> (text-cells (.text l)) 12))
+                          (store! at (load i))
+                          0)
+                        (set! i (+ (load i) 1)))))
+            (if (< (load at) 0)
+                (do (println "skip nothing long enough was drawn") 0)
+                (let [l (al-elem [Line] (field app lines) (load at))
+                      y (+ (.top l) 6.0)
+                      x0 (+ (.left l) 1.0)
+                      x1 (+ (.left l) (* (.adv l) 10.0))]
+                  ;; press, drag, release
+                  (click! app cv world x0 y (cast f64 WIDTH) (cast f64 HEIGHT))
+                  (select-drag! app x1 y)
+                  (select-end! app)
+                  (let [got (selection-text app a)
+                        wanted (substr (.text l) 0 (prefix-bytes (.text l) 10))]
+                    (if (= got wanted)
+                        (do (println "ok   dragging selects [{s}]" got) 0)
+                        (do
+                          (println "FAIL dragged [{s}] wanted [{s}]" got wanted)
+                          (set! failures (+ (load failures) 1))
+                          0)))
+                  ;; a click outside the conversation drops it
+                  (click! app cv world 100.0 200.0 (cast f64 WIDTH) (cast f64 HEIGHT))
+                  (if (sel-active? app)
+                      (do
+                        (println "FAIL selection survived a click elsewhere")
+                        (set! failures (+ (load failures) 1))
+                        0)
+                      (do (println "ok   a click elsewhere drops the selection") 0)))))
+          0))
+    (println "--- {d} failures" (load failures))
+    (load failures)))
+
+;; Opens an issue and presses Run on it, then follows the run to its end: the
+;; whole issue path, with a real agent, exactly as the window drives it.
+(defn run-issue-probe [(which i64)] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-issue! app world which)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (if (< (view-issue app) 0)
+        (do (println "no such issue") 1)
+        (let [issue (al-elem [harness/Issue] (field world issues) (view-issue app))]
+          (println "issue [{s}] {s}" (.project issue) (.title issue))
+          (println "button: {s} · steps {d}" (run-label app) (step-count app))
+          (run-open! app world)
+          (let [(mut ticks) 0]
+            (loop (if (or (>= (load ticks) 60) (>= (view-run app) 0))
+                      (break)
+                      (do
+                        (usleep 500000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! ticks (+ (load ticks) 1))))))
+          (if (< (view-run app) 0)
+              (do (println "no run appeared") 1)
+              (do
+                (println "run opened: {s}"
+                         (.workflow (al-elem [harness/Run] (field world runs) (view-run app))))
+                (let [(mut ticks) 0]
+                  (loop (if (or (>= (load ticks) 600) (not (.running app)))
+                            (break)
+                            (do
+                              (usleep 500000)
+                              (set! (.now app) (CACurrentMediaTime))
+                              (poll! app world a)
+                              (set! ticks (+ (load ticks) 1))))))
+                (let [run (al-elem [harness/Run] (field world runs) (view-run app))]
+                  (println "finished: {d}/{d} · {s}"
+                           (.done run)
+                           (.total run)
+                           (state-word (.state run))))
+                0))))))
+
+;; Clicking the composer, rendered: before, and immediately after, so the
+;; difference a click makes can be looked at rather than asserted.
+(defn composer-probe [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+    (start-here! app world)
+    (set! (.now app) 100.0)
+    ;; A paragraph, so the wrapping and the growing are in the picture.
+    (set-input! app
+                "This is a long message typed into the composer to show that it wraps at the measure of the pane instead of running off the right edge, and that the strip grows upward to hold it.\nA second line, after a shift-return.")
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (write-png ctx c"composer-before.png")
+    ;; A click in the strip, then the frame a fifth of a second later.
+    (click! app cv world 1600.0 (- (cast f64 HEIGHT) 20.0) (cast f64 WIDTH) (cast f64 HEIGHT))
+    (println "lit at {d} · now {d}" (cast i64 (.composer-lit app)) (cast i64 (.now app)))
+    (set! (.now app) 100.1)
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (write-png ctx c"composer-after.png")
+    (if (> (.composer-lit app) 0.0)
+        (do (println "ok   the composer registers a click") 0)
+        (do (println "FAIL clicking the composer did nothing") 1))))
+
+;; Says something to a run that has already finished, the way the composer does,
+;; and follows what it starts.
+(defn carry-probe [(which i64) (text (slice u8))] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (open-run! app world which)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (if (< (view-run app) 0)
+        (do (println "no such run") 1)
+        (let [run (al-elem [harness/Run] (field world runs) (view-run app))]
+          (println "open run {s} · live {d} · lines {d}"
+                   (.workflow run)
+                   (if (live-run? app world) 1 0)
+                   (al-len [Line] (.lines app)))
+          (set-input! app text)
+          (send! app world)
+          (let [(mut ticks) 0]
+            (loop (if (or (>= (load ticks) 90) (>= (slice-len [u8] (.pending app)) 1))
+                      (break)
+                      (do (usleep 200000) (set! ticks (+ (load ticks) 1))))))
+          (println "pending [{s}]" (.pending app))
+          (let [(mut ticks) 0]
+            (loop (if (or (>= (load ticks) 120) (= (slice-len [u8] (.pending app)) 0))
+                      (break)
+                      (do
+                        (usleep 500000)
+                        (set! (.now app) (CACurrentMediaTime))
+                        (poll! app world a)
+                        (set! ticks (+ (load ticks) 1))))))
+          (if (< (view-run app) 0)
+              (do (println "no follow-up run appeared") 1)
+              (let [now (al-elem [harness/Run] (field world runs) (view-run app))]
+                (println "now watching {s} · {d}/{d} · {s}"
+                         (.workflow now)
+                         (.done now)
+                         (.total now)
+                         (state-word (.state now)))
+                0))))))
+
+;; A conversation with the backlog, headless: say something, let the agent work,
+;; and print what it wrote.
+(defn backlog-probe [(text (slice u8))] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (start-here! app world)
+    (project-label-sync! app world)
+    (set! (.now app) (CACurrentMediaTime))
+    (new-issue! app world)
+    (println "backlog for {s} · {d} issues before"
+             (.project-label app)
+             (al-len [harness/Issue] (.issues world)))
+    (set-input! app text)
+    (send! app world)
+    (let [(mut ticks) 0
+          (mut said) 0]
+      (loop (if (or (>= (load ticks) 900) (= (.agent-stage app) 0))
+                (break)
+                (do
+                  (usleep 500000)
+                  (set! (.now app) (CACurrentMediaTime))
+                  (poll! app world a)
+                  (let [n (al-len [Line] (.lines app))]
+                    (loop (if (>= (load said) n)
+                              (break)
+                              (do
+                                (println "  | {s}" (.text (al-elem [Line] (field app lines) (load said))))
+                                (set! said (+ (load said) 1))))))
+                  (set! ticks (+ (load ticks) 1))))))
+    (println "after: {d} issues" (al-len [harness/Issue] (.issues world)))
+    (let [n (al-len [harness/Issue] (.issues world))
+          (mut i) 0]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [issue (al-elem [harness/Issue] (field world issues) (load i))]
+                  (println "  issue [{s}] {s}" (.project issue) (.title issue))
+                  (set! i (+ (load i) 1))))))
     0))
 
 ;; Starts the harness service and asks it what tools it has. Proves the whole
@@ -762,15 +2365,49 @@
         (Some [v] (cast f64 v))
         (None [] fallback))))
 
-(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+(defn main [(argc i32) (argv (ptr (ptr i8))) (envp (ptr (ptr i8)))] (-> i64)
+  ;; Publish the environment this process was started with, or every command this
+  ;; window runs gets an empty one: no HOME, so the harness cannot find
+  ;; projects.json; no PATH; no API keys. `posix_spawn` takes the child
+  ;; environment explicitly, and main's third argument is the only portable place
+  ;; to get it.
+  (os/publish-envp! envp)
   (let [flag (if (> (cast i64 argc) 1) (cstr->str (load (index argv 1))) "")]
-    (cond (= flag "--render") (render-all)
-          (= flag "--real")
+    (cond (= flag "--real")
             (render-real 0
                          (arg-num argc argv 2 (cast f64 WIDTH))
                          (arg-num argc argv 3 (cast f64 HEIGHT))
                          (arg-num argc argv 4 0.0))
+          (= flag "--shot")
+            (render-shot (if (> (cast i64 argc) 2) (cstr->str (load (index argv 2))) "project")
+                         (cast i64 (arg-num argc argv 3 0.0))
+                         (cast f64 WIDTH)
+                         (cast f64 HEIGHT)
+                         (arg-num argc argv 4 0.0))
           (= flag "--spawn-test") (spawn-test)
+          (= flag "--rail") (rail-probe)
+          (= flag "--run") (run-probe (cast i64 (arg-num argc argv 2 0.0)))
+          (= flag "--run-now") (run-now-probe (cast i64 (arg-num argc argv 2 0.0)))
+          (= flag "--stop") (stop-probe (cast i64 (arg-num argc argv 2 0.0)))
+          (= flag "--keys") (keys-probe)
+          (= flag "--mouse") (mouse-probe)
+          (= flag "--composer") (composer-probe)
+          (= flag "--backlog")
+            (backlog-probe (if (> (cast i64 argc) 2)
+                               (cstr->str (load (index argv 2)))
+                               "the window forgets its size between launches"))
+          (= flag "--carry")
+            (carry-probe (cast i64 (arg-num argc argv 2 0.0))
+                         (if (> (cast i64 argc) 3) (cstr->str (load (index argv 3))) "also write three.txt containing three"))
+          (= flag "--run-issue") (run-issue-probe (cast i64 (arg-num argc argv 2 0.0)))
+          (= flag "--say")
+            (say-probe (cast i64 (arg-num argc argv 2 0.0))
+                       (if (> (cast i64 argc) 3) (cstr->str (load (index argv 3))) "stop and finish"))
+          (= flag "--select")
+            (select-probe (arg-num argc argv 2 0.0)
+                          (arg-num argc argv 3 0.0)
+                          (arg-num argc argv 4 0.0)
+                          (arg-num argc argv 5 0.0))
           (= flag "--serve-test") (serve-probe (cast i64 (arg-num argc argv 2 8787.0)))
           (= flag "--author")
             (author-probe (if (> (cast i64 argc) 2)

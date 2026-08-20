@@ -79,5 +79,10 @@
 
 ;; The hover wash. Barely there on purpose: it says "this row is a target", not
 ;; "this row is selected".
+(defn select-wash [] (-> Color)
+  ;; Selection is a wash rather than the accent itself: the text stays the
+  ;; brightest thing in the line, and the accent keeps meaning "this is live".
+  (col 56 44 22))
+
 (defn hover-wash [] (-> Color)
   (col 23 22 19))

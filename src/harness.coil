@@ -1,8 +1,9 @@
 ;; The real backing: the agent harness on disk.
 ;;
-;; A factory is a workflow. `factories/<folder>/factory.json` names it and lists
-;; its workers, which are its steps. `.factory-runs/<name>/<timestamp>.jsonl` is
-;; the durable event journal a run wrote — the same versioned records the
+;; A workflow is a reusable definition and nothing else: `factories/<folder>/factory.json`
+;; names it and lists the workers that are its steps. It is not owned by a project.
+;; Running one *in* a project produces a run, and `.factory-runs/<name>/<timestamp>.jsonl`
+;; is the durable event journal that run wrote — the same versioned records the
 ;; harness's own TUI replays — so run state and every conversation in this
 ;; window are read from what actually happened rather than modelled here.
 ;;
@@ -23,13 +24,36 @@
 (import "coil.os" :as os)
 
 (defstruct Workflow
-  [(project (slice u8))
-   (name (slice u8))
+  [(name (slice u8))
    (folder (slice u8))
    (goal (slice u8))
-   (workers (ArrayList (slice u8)))
+   ;; What it needs before it can run: "" for nothing, "issue" for a piece of
+   ;; work handed to it. A workflow that needs one cannot be started on its own,
+   ;; here or from a terminal.
+   (input (slice u8))
+   (workers (ArrayList (slice u8)))])
+
+;; One execution of one workflow in one place. The journal records the workspace
+;; it ran in, and that is what attributes it to a project — a durable fact about
+;; what happened, rather than a label somebody attached to a definition.
+(defstruct Run
+  [(workflow (slice u8))
+   ;; The id the run gave itself, from its own first record. It is what a message
+   ;; is addressed to.
+   (run-id (slice u8))
+   (project (slice u8))
+   (workspace (slice u8))
    (journal (slice u8))
+   ;; Milliseconds, from the journal's own filename: what orders the list.
+   (started i64)
    (done i64)
+   (total i64)
+   (state State)
+   ;; Stopped by a person rather than finished or failed on its own.
+   (stopped bool)
+   ;; Its process is gone but it never wrote an ending: killed, crashed, or the
+   ;; machine went away. A run like this used to spin in the rail forever.
+   (abandoned bool)
    ;; The size the journal had when it was last read. A run appends, so a
    ;; changed size is the cheap signal that there is something new to show —
    ;; cheap enough to ask twice a second without re-reading a megabyte.
@@ -161,7 +185,6 @@
 
 (defn read-factory [(a (ptr Allocator))
                     (root (slice u8))
-                    (project (slice u8))
                     (folder (slice u8))] (-> (Option Workflow))
   (let [manifest (path3 a (path3 a root "/factories/" folder) "/" "factory.json")]
     (if (not (dir/exists? a manifest))
@@ -189,18 +212,16 @@
                                         0)
                                       (set! i (+ (load i) 1)))))
                           0))
-                      (set! (.project w) project)
                       (set! (.name w) (if (= (slice-len [u8] name) 0) folder name))
                       (set! (.folder w) (path3 a root "/factories/" folder))
                       (set! (.goal w) (doc-string d 0 "goal"))
+                      (set! (.input w) (doc-string d 0 "input"))
                       (set! (.workers w) (load steps))
-                      (set! (.journal w) (newest-journal a root (.name w)))
-                      (set! (.done w) (journal-done-count a (.journal w)))
-                      (set! (.bytes w) (dir/file-size a (.journal w)))
                       (Some (load w))))))))))
 
-;; Every factory under `<root>/factories`, in directory order.
-(defn discover [(a (ptr Allocator)) (root (slice u8)) (project (slice u8))] (-> (ArrayList Workflow))
+;; Every factory under `<root>/factories`, in directory order: the library of
+;; workflows you can run, in any project.
+(defn discover [(a (ptr Allocator)) (root (slice u8))] (-> (ArrayList Workflow))
   (let [(mut out) (al-new [Workflow] a)
         names (dir/entries a (join a root "/factories"))
         n (al-len [(slice u8)] names)
@@ -208,11 +229,223 @@
     (loop (if (>= (load i) n)
               (break)
               (do
-                (match (read-factory a root project (al-get [(slice u8)] names (load i)))
+                (match (read-factory a root (al-get [(slice u8)] names (load i)))
                   (Some [w] (al-push! [Workflow] (mut out) w))
                   (None [] 0))
                 (set! i (+ (load i) 1)))))
     (load out)))
+
+
+;; ---------------------------------------------------------------- runs
+
+;; One line of a journal, from `from`.
+(defn journal-line [(text (slice u8)) (from i64)] (-> (slice u8))
+  (substr text from (line-at text from)))
+
+;; The workspace a run happened in. Its first record is `factory.run.created`,
+;; which carries it, so this reads one line rather than a megabyte.
+(defn journal-workspace [(a (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [head (journal-line text 0)]
+    (if (< (slice-len [u8] head) 2)
+        ""
+        (match (json/parse a head)
+          (Err [e] "")
+          (Ok [d]
+              (let [payload (json/object-get d 0 "payload")]
+                (if (< payload 0) "" (doc-string d payload "workspace"))))))))
+
+;; The id in a run's first record, which is what its inbox is named after.
+;; The pid a run recorded for itself, or 0 for a journal written before runs
+;; recorded one.
+(defn journal-pid [(a (ptr Allocator)) (text (slice u8))] (-> i64)
+  (let [head (journal-line text 0)]
+    (if (< (slice-len [u8] head) 2)
+        0
+        (match (json/parse a head)
+          (Err [e] 0)
+          (Ok [d]
+              (let [payload (json/object-get d 0 "payload")]
+                (if (< payload 0)
+                    0
+                    (let [at (json/object-get d payload "pid")]
+                      (if (< at 0)
+                          0
+                          (match (str-parse-int (json/number-text d (json/token d at)))
+                            (Some [v] v)
+                            (None [] 0)))))))))))
+
+(defn journal-run-id [(a (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [head (journal-line text 0)]
+    (if (< (slice-len [u8] head) 2)
+        ""
+        (match (json/parse a head)
+          (Err [e] "")
+          (Ok [d] (doc-string d 0 "run_id"))))))
+
+;; The project a workspace belongs to: the declared project whose checkout *is*
+;; that directory. Matching a prefix instead would file every scratch run under
+;; whatever project happens to contain `.factory-workspaces`, which is how a
+;; project ends up looking like it has fifteen runs it never had.
+;;
+;; A run in a scratch directory belongs to no project and is not shown. The rail
+;; is projects, and a scratch directory is not one.
+(defn workspace-project [(projects (ptr (ArrayList Project))) (workspace (slice u8))] (-> (slice u8))
+  (let [n (al-len [Project] (load projects))
+        (mut i) 0
+        (mut found) ""]
+    (loop (if (or (>= (load i) n) (> (slice-len [u8] (load found)) 0))
+              (break)
+              (let [p (al-elem [Project] projects (load i))
+                    path (.path p)]
+                (when (and (> (slice-len [u8] path) 0) (= workspace path))
+                  (set! found (.name p))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn digits-of [(name (slice u8))] (-> i64)
+  (let [n (slice-len [u8] name)
+        (mut i) 0
+        (mut value) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [c (primitive/cast i64 (slice-get [u8] name (load i)))]
+                (if (and (>= c 48) (<= c 57))
+                    (do (set! value (+ (* (load value) 10) (- c 48))) (set! i (+ (load i) 1)))
+                    (break)))))
+    (load value)))
+
+;; What a journal says happened, in one pass: how many workers were accepted, and
+;; whether the factory itself finished, failed, or is still going.
+;; Two hours. Long enough that a slow factory is never called dead, short enough
+;; that yesterday's crash is not still spinning.
+(const STALE_AFTER_MS 7200000)
+
+(defn read-run [(a (ptr Allocator))
+                (projects (ptr (ArrayList Project)))
+                (workflow (slice u8))
+                (path (slice u8))
+                (file (slice u8))] (-> (Option Run))
+  (match (fs/read-file a path)
+    (Err [e] (None))
+    (Ok [text]
+        (let [workspace (journal-workspace a text)
+              project (workspace-project projects workspace)]
+          (if (= (slice-len [u8] project) 0)
+              (None)
+              (let [r (alloc/stack Run)
+                    done (count-occurrences text "\"event\":\"factory.stage.accepted\"")
+                    finished (> (count-occurrences text "\"event\":\"factory.run.completed\"") 0)
+                    failed (> (count-occurrences text "\"event\":\"factory.run.failed\"") 0)
+                    started (count-occurrences text "\"event\":\"factory.stage.started\"")]
+                (set! (.workflow r) workflow)
+                (set! (.run-id r) (journal-run-id a text))
+                (set! (.project r) project)
+                (set! (.workspace r) workspace)
+                (set! (.journal r) path)
+                (set! (.started r) (digits-of file))
+                (set! (.done r) done)
+                (set! (.total r) (if (> started done) started done))
+                (set! (.stopped r) (was-stopped? a path))
+                ;; No ending in the journal and no process behind it: whatever it
+                ;; was doing, it is not doing it now. A run from before pids were
+                ;; recorded reports 0 and is left alone.
+;; A run with a pid is asked about directly. One written before runs
+                ;; recorded a pid can only be judged by age: nothing here runs for
+                ;; hours, so a journal that old with no ending is not a run any
+                ;; more, whatever it was.
+                (set! (.abandoned r)
+                      (and (not finished)
+                           (and (not failed)
+                                (and (not (.stopped r))
+                                     (let [pid (journal-pid a text)
+                                           started (digits-of file)]
+                                       (if (> pid 0)
+                                           (not (dir/alive? pid))
+                                           (and (> started 0)
+                                                (> (- (dir/now-ms) started) STALE_AFTER_MS))))))))
+                (set! (.state r)
+                      (cond failed (SFailed)
+                            finished (SDone)
+                            ;; Stopped by a person, which leaves no terminal
+                            ;; record in the journal because nothing was left to
+                            ;; write one.
+                            (was-stopped? a path) (SFailed)
+                            (.abandoned r) (SFailed)
+                            :else (SRunning)))
+                (set! (.bytes r) (slice-len [u8] text))
+                (Some (load r))))))))
+
+;; Every run of every workflow that happened in a declared project, newest first.
+;; A run is discovered from what it wrote, not from anything a definition claims,
+;; which is why moving or editing a workflow cannot misfile its history.
+(defn discover-runs [(a (ptr Allocator))
+                     (root (slice u8))
+                     (projects (ptr (ArrayList Project)))] (-> (ArrayList Run))
+  (let [(mut out) (al-new [Run] a)
+        runs-root (join a root "/.factory-runs")
+        names (dir/entries a runs-root)
+        n (al-len [(slice u8)] names)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [workflow (al-get [(slice u8)] names (load i))
+                    dirpath (path3 a runs-root "/" workflow)
+                    files (dir/entries-with-suffix a dirpath ".jsonl")
+                    count (al-len [(slice u8)] files)
+                    (mut k) 0]
+                (loop (if (>= (load k) count)
+                          (break)
+                          (let [file (al-get [(slice u8)] files (load k))]
+                            (match (read-run a
+                                             projects
+                                             workflow
+                                             (path3 a dirpath "/" file)
+                                             file)
+                              (Some [r] (al-push! [Run] (mut out) r))
+                              (None [] 0))
+                            (set! k (+ (load k) 1)))))
+                (set! i (+ (load i) 1)))))
+    (sort-runs! (mut out))
+    (load out)))
+
+;; Newest first. An insertion sort: this list is tens of entries, not thousands.
+(defn sort-runs! [(runs (mut (ArrayList Run)))] (-> i64)
+  (let [n (al-len [Run] (load runs))
+        (mut i) 1]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [(mut k) (load i)]
+                (loop (if (<= (load k) 0)
+                          (break)
+                          (let [here (al-elem [Run] runs (load k))
+                                before (al-elem [Run] runs (- (load k) 1))]
+                            (if (<= (.started before) (.started here))
+                                ;; Write through the pointers: these name slots
+                                ;; in the list, and rebinding them would sort
+                                ;; nothing.
+                                (let [swap (load before)]
+                                  (store! before (load here))
+                                  (store! here swap)
+                                  (set! k (- (load k) 1)))
+                                (break)))))
+                (set! i (+ (load i) 1)))))
+    0))
+
+;; The library entry a run was an execution of, or -1 if the workflow is gone.
+;; A run outlives the definition that produced it, so this is allowed to fail.
+(defn workflow-index [(flows (ptr (ArrayList Workflow))) (name (slice u8))] (-> i64)
+  (let [n (al-len [Workflow] (load flows))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (.name (al-elem [Workflow] flows (load i))) name)
+                  (store! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
 
 ;; ---------------------------------------------------------------- replay
 
@@ -234,21 +467,28 @@
               (set! i (+ (load i) 1))))
     (load i)))
 
-;; Fill the app's steps from the manifest, then walk the journal once to give
-;; each step the state its run actually reached.
-(defn load-into! [(app (ptr App)) (wf (ptr Workflow))] (-> i64)
+;; Fill the app's steps from the workflow this run executed, then walk its journal
+;; once to give each step the state it actually reached. Which workflow that was
+;; comes from the run itself; if its definition has since been deleted, the steps
+;; are still there, named by position, because the journal knows how many ran.
+(defn load-run! [(app (ptr App))
+                 (run (ptr Run))
+                 (workers (ArrayList (slice u8)))] (-> i64)
   (let [a (.alc app)
-        count (al-len [(slice u8)] (.workers wf))
+        named (al-len [(slice u8)] workers)
+        count (if (> named 0) named (.total run))
         (mut i) 0]
     (steps-clear! app)
     (lines-clear! app)
-    (set! (.title app) (.name wf))
-    (set! (.factory app) (.name wf))
+    (set! (.title app) (.workflow run))
+    (set! (.factory app) (.workflow run))
     (loop (if (>= (load i) count)
               (break)
               (do
                 (push-step! app
-                            (mk-step (al-get [(slice u8)] (.workers wf) (load i))
+                            (mk-step (if (> named 0)
+                                         (al-get [(slice u8)] workers (load i))
+                                         (own-str a (join2 "step " (dec-str (+ (load i) 1)))))
                                      (- (load i) 1)
                                      -1
                                      (SQueued)
@@ -265,43 +505,86 @@
                   (set! (.changed s) 0.0)
                   (set! k (+ (load k) 1))))))
     (set! (.journal app) "")
-    (when (> (slice-len [u8] (.journal wf)) 0)
-      (match (fs/read-file a (.journal wf))
-        (Ok [text]
-            (do
-              (set! (.journal app) text)
-              (let [n (slice-len [u8] text)
-                    (mut at) 0]
-                (loop (if (>= (load at) n)
-                          (break)
-                          (let [stop (line-at text (load at))
-                                row (substr text (load at) stop)]
-                            (when (> (slice-len [u8] row) 2)
-                              (match (json/parse a row)
-                                (Ok [d]
-                                    (let [event (doc-string d 0 "event")
-                                          run (doc-string d 0 "run_id")
-                                          (mut k) 0]
-                                      ;; Which step is this? The run id carries it.
-                                      (loop (if (>= (load k) count)
-                                                (break)
-                                                (do
-                                                  (when (= run (worker-run-id a (.name wf) (+ (load k) 1)))
-                                                    (cond (= event "run.started")
-                                                            (set! (.state (step-at app (load k))) (SRunning))
-                                                          (= event "run.completed")
-                                                            (set! (.state (step-at app (load k))) (SDone))
-                                                          (= event "run.failed")
-                                                            (set! (.state (step-at app (load k))) (SFailed))
-                                                          :else 0)
-                                                    0)
-                                                  (set! k (+ (load k) 1)))))
-                                      0))
-                                (Err [e] 0))
-                              0)
-                            (set! at (+ stop 1)))))
-                0)))
-        (Err [e] 0))
+    (match (fs/read-file a (.journal run))
+      (Ok [text]
+          (do
+            (set! (.journal app) text)
+            (let [n (slice-len [u8] text)
+                  (mut at) 0]
+              (loop (if (>= (load at) n)
+                        (break)
+                        (let [stop (line-at text (load at))
+                              row (substr text (load at) stop)]
+                          (when (> (slice-len [u8] row) 2)
+                            (match (json/parse a row)
+                              (Ok [d]
+                                  (let [event (doc-string d 0 "event")
+                                        rid (doc-string d 0 "run_id")
+                                        (mut k) 0]
+                                    ;; Which step is this? The run id carries it.
+                                    (loop (if (>= (load k) count)
+                                              (break)
+                                              (do
+                                                (when (= rid
+                                                         (worker-run-id a
+                                                                        (.workflow run)
+                                                                        (+ (load k) 1)))
+                                                  (cond (= event "run.started")
+                                                          (set! (.state (step-at app (load k))) (SRunning))
+                                                        (= event "run.completed")
+                                                          (set! (.state (step-at app (load k))) (SDone))
+                                                        (= event "run.failed")
+                                                          (set! (.state (step-at app (load k))) (SFailed))
+                                                        :else 0)
+                                                  0)
+                                                (set! k (+ (load k) 1)))))
+                                    0))
+                              (Err [e] 0))
+                            0)
+                          (set! at (+ stop 1)))))
+              0)))
+      (Err [e] 0))
+    (relayout! app)
+    0))
+
+;; A workflow on its own: what it would do, not what it did. Every step is
+;; queued because nothing has run — this is the definition, and the pane that
+;; shows it is the same pane that shows a run, so the shape is comparable.
+(defn load-workflow! [(app (ptr App)) (wf (ptr Workflow))] (-> i64)
+  (let [a (.alc app)
+        count (al-len [(slice u8)] (.workers wf))
+        (mut i) 0]
+    (steps-clear! app)
+    (lines-clear! app)
+    (set! (.title app) (.name wf))
+    (set! (.factory app) "")
+    (set! (.journal app) "")
+    (loop (if (>= (load i) count)
+              (break)
+              (do
+                (push-step! app
+                            (mk-step (al-get [(slice u8)] (.workers wf) (load i))
+                                     (- (load i) 1)
+                                     -1
+                                     (SQueued)
+                                     ""
+                                     0))
+                (set! i (+ (load i) 1)))))
+    (let [(mut k) 0]
+      (loop (if (>= (load k) count)
+                (break)
+                (let [s (step-at app (load k))]
+                  (set! (.born s) 0.0)
+                  (set! (.changed s) 0.0)
+                  (set! k (+ (load k) 1))))))
+    (when (> (slice-len [u8] (.goal wf)) 0)
+      (push-wrapped! app (Cont) (.goal wf) 52)
+      0)
+    (when (> (slice-len [u8] (.input wf)) 0)
+      (push-wrapped! app
+                     (Cont)
+                     "This workflow works on an issue, so it is not started on its own. Pick one to run it with, or press ⌘I to write a new one."
+                     52)
       0)
     (relayout! app)
     0))
@@ -370,6 +653,20 @@
                                             0)
                                         (= event "tool.call.failed")
                                           (do (push-line! app (mk-line (Result) "failed" "")) 0)
+                                        (= event "operator.message.delivered")
+                                          (do
+                                            (when (load speaking)
+                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+                                              (set! speech (sb-new a))
+                                              (set! speaking false)
+                                              0)
+                                            (when (>= payload 0)
+                                              (push-wrapped! app
+                                                             (You)
+                                                             (unescape a (doc-string d payload "text"))
+                                                             52)
+                                              0)
+                                            0)
                                         :else 0)
                                   0)
                                 0))
@@ -383,18 +680,46 @@
 
 ;; ---------------------------------------------------------------- starting
 
-;; Start a factory run. This is the one thing in this module that is not a read,
-;; so it is deliberately explicit: it shells out to the harness binary exactly as
-;; a person would, in the harness's own directory, and then leaves. The run's
-;; progress comes back the same way every other run's does — through the journal
-;; it writes.
-(defn start-run! [(a (ptr Allocator)) (root (slice u8)) (folder (slice u8))] (-> i64)
+;; Run a workflow in a project. This is the one thing in this module that is not
+;; a read, so it is deliberately explicit: it shells out to the harness binary
+;; exactly as a person would, naming the project the work happens in, and then
+;; leaves. The run's progress comes back the way every run's does — through the
+;; journal it writes.
+(defn run-command [(a (ptr Allocator))
+                   (root (slice u8))
+                   (folder (slice u8))
+                   (project (slice u8))] (-> (slice u8))
   (let [(mut cmd) (sb-new a)]
     (sb-push-str! (mut cmd) "cd ")
     (sb-push-str! (mut cmd) root)
-    (sb-push-str! (mut cmd) " && ./harness factory run ")
+    (sb-push-str! (mut cmd) " && exec ./harness factory run ")
     (sb-push-str! (mut cmd) folder)
-    (spawn-shell a (sb-finish! (mut cmd)))))
+    (sb-push-str! (mut cmd) " --project ")
+    (sb-push-str! (mut cmd) project)
+    (sb-finish! (mut cmd))))
+
+;; Where a started command's output goes. A run that refuses to start says why on
+;; its own stderr, and a window that throws that away can only report that nothing
+;; happened — which is exactly what it did before this existed.
+(defn log-path [(a (ptr Allocator)) (root (slice u8))] (-> (slice u8))
+  (join a root "/.coil-gui-last-run.log"))
+
+;; `exec` matters: without it the pid this window holds is a shell whose child is
+;; the harness, and stopping the shell leaves the run going. With it, the shell
+;; becomes the harness and the pid is the thing itself.
+(defn logged [(a (ptr Allocator)) (command (slice u8)) (log (slice u8))] (-> (slice u8))
+  (let [(mut cmd) (sb-new a)]
+    (sb-push-str! (mut cmd) command)
+    (sb-push-str! (mut cmd) " >")
+    (sb-push-str! (mut cmd) log)
+    (sb-push-str! (mut cmd) " 2>&1")
+    (sb-finish! (mut cmd))))
+
+(defn start-run! [(a (ptr Allocator))
+                  (root (slice u8))
+                  (folder (slice u8))
+                  (project (slice u8))] (-> i64)
+  (spawn-shell a (logged a (run-command a root folder project) (log-path a root))))
 
 ;; /bin/sh -c <line>, detached. Returns the child pid, or a negative value.
 (defn spawn-shell [(a (ptr Allocator)) (line (slice u8))] (-> i64)
@@ -405,17 +730,10 @@
     (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 3) (primitive/cast (ptr i8) 0))
     (os/spawn c"/bin/sh" (primitive/cast (ptr (ptr i8)) argv) (os/spawn-envp))))
 
-;; Has this workflow's newest journal changed since it was loaded? A running
-;; factory writes a new file, so a different path means new work to show.
-;; Is there anything new? A run either starts a new journal or appends to the
-;; one it has, so path and size together answer it without reading the file.
-(defn journal-changed? [(a (ptr Allocator))
-                        (root (slice u8))
-                        (wf (ptr Workflow))] (-> bool)
-  (if (= (slice-len [u8] (.journal wf)) 0)
-      (> (slice-len [u8] (newest-journal a root (.name wf))) 0)
-      (or (!= (dir/file-size a (.journal wf)) (.bytes wf))
-          (!= (newest-journal a root (.name wf)) (.journal wf)))))
+;; Is there anything new in this run's journal? A run only appends, so its size
+;; answers it without reading the file.
+(defn journal-changed? [(a (ptr Allocator)) (run (ptr Run))] (-> bool)
+  (!= (dir/file-size a (.journal run)) (.bytes run)))
 
 ;; Has the factory itself finished? Once it has, there is nothing left to poll.
 (defn run-finished? [(app (ptr App))] (-> bool)
@@ -423,11 +741,19 @@
     (Some [at] true)
     (None [] false)))
 
-(defn refresh! [(a (ptr Allocator)) (root (slice u8)) (wf (ptr Workflow))] (-> i64)
-  (set! (.journal wf) (newest-journal a root (.name wf)))
-  (set! (.done wf) (journal-done-count a (.journal wf)))
-  (set! (.bytes wf) (dir/file-size a (.journal wf)))
-  0)
+(defn refresh-run! [(a (ptr Allocator))
+                    (projects (ptr (ArrayList Project)))
+                    (run (ptr Run))] (-> i64)
+  (match (read-run a projects (.workflow run) (.journal run) "")
+    (Some [fresh]
+          (let [now fresh
+                keep (.started run)]
+            (set! (.done run) (.done now))
+            (set! (.total run) (.total now))
+            (set! (.state run) (.state now))
+            (set! (.bytes run) (.bytes now))
+            0))
+    (None [] 0)))
 
 ;; ---------------------------------------------------------------- authoring
 
@@ -494,7 +820,9 @@
 ;; creates something in the harness, and it creates the same shape a person
 ;; would write by hand: a manifest and a worker in Markdown. Returns the folder,
 ;; or "" if it could not be written.
-(defn create-workflow! [(a (ptr Allocator)) (root (slice u8)) (goal (slice u8))] (-> (slice u8))
+(defn create-workflow! [(a (ptr Allocator))
+                        (root (slice u8))
+                        (goal (slice u8))] (-> (slice u8))
   (let [slug (slugify a goal)
         name (if (= (slice-len [u8] slug) 0) "untitled" slug)
         folder (path3 a root "/factories/" name)
@@ -507,9 +835,10 @@
     (sb-push-str! (mut json) name)
     (sb-push-str! (mut json) "\",\n  \"goal\": \"")
     (sb-push-str! (mut json) (json-escape a goal))
+    (sb-push-str! (mut json) "\",\n")
     ;; `context` is not optional: the harness's loader rejects a manifest whose
     ;; context is not an array, so an empty one is written explicitly.
-    (sb-push-str! (mut json) "\",\n  \"context\": [],\n")
+    (sb-push-str! (mut json) "  \"context\": [],\n")
     (sb-push-str! (mut json) "  \"tools\": {\"groups\": [\"filesystem\", \"bash\"]},\n")
     (sb-push-str! (mut json) "  \"workers\": [\"01-do.md\"]\n}\n")
     (sb-push-str! (mut md) "# Worker: do the work\n\n")
@@ -522,3 +851,430 @@
           (match (fs/write-file a worker (sb-finish! (mut md)))
             (Err [e] "")
             (Ok [n2] folder))))))
+
+;; ---------------------------------------------------------------- projects
+
+;; A project is a checkout the harness knows by name, declared once in
+;; `~/.coil-agent-harness/projects.json`. This window reads exactly the file the
+;; `harness projects` command reads: if the two disagreed about what "snake"
+;; means, the button that starts a run would be pointing somewhere other than the
+;; row you clicked.
+(defstruct Project
+  [(name (slice u8))
+   (label (slice u8))
+   (path (slice u8))
+   (summary (slice u8))
+   ;; The workflow an issue filed here is handed to, when nothing names another.
+   (issue-workflow (slice u8))])
+
+(defn env-or [(a (ptr Allocator)) (name (slice u8)) (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get a name)
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] fallback)))
+    (Err [e] fallback)))
+
+(defn projects-path [(a (ptr Allocator))] (-> (slice u8))
+  (let [configured (env-or a "HARNESS_CONFIG_DIR" "")]
+    (if (> (slice-len [u8] configured) 0)
+        (join a configured "/projects.json")
+        (path3 a (env-or a "HOME" "/tmp") "/.coil-agent-harness" "/projects.json"))))
+
+;; The declared projects, in the order the file lists them. A missing or
+;; malformed file yields none: this pane is a view, and refusing to open a window
+;; is not its call to make. The harness itself refuses the run instead, with a
+;; message that names the entry.
+(defn discover-projects [(a (ptr Allocator))] (-> (ArrayList Project))
+  (let [(mut out) (al-new [Project] a)
+        path (projects-path a)]
+    (if (not (dir/exists? a path))
+        (load out)
+        (match (fs/read-file a path)
+          (Err [e] (load out))
+          (Ok [text]
+              (match (json/parse a text)
+                (Err [e] (load out))
+                (Ok [d]
+                    (let [at (json/object-get d 0 "projects")]
+                      (if (< at 0)
+                          (load out)
+                          (let [count (json/child-count (json/token d at))
+                                (mut i) 0]
+                            (loop (if (>= (load i) count)
+                                      (break)
+                                      (let [entry (json/array-nth d at (load i))]
+                                        (when (>= entry 0)
+                                          (let [p (alloc/stack Project)
+                                                name (doc-string d entry "name")
+                                                label (doc-string d entry "label")
+                                                workflow (doc-string d entry "default_issue_workflow")]
+                                            (when (> (slice-len [u8] name) 0)
+                                              (set! (.name p) name)
+                                              (set! (.label p)
+                                                    (if (= (slice-len [u8] label) 0) name label))
+                                              (set! (.path p)
+                                                    (expand-home a (doc-string d entry "path")))
+                                              (set! (.summary p) (doc-string d entry "summary"))
+                                              (set! (.issue-workflow p)
+                                                    (if (= (slice-len [u8] workflow) 0)
+                                                        "issues"
+                                                        workflow))
+                                              (al-push! [Project] (mut out) (load p))
+                                              0)
+                                            0)
+                                          0)
+                                        (set! i (+ (load i) 1)))))
+                            (load out)))))))))))
+
+;; `~/x` is what a person writes in a config file; every path this window
+;; compares against a journal's workspace is absolute, so it is expanded once
+;; here rather than at every comparison.
+(defn expand-home [(a (ptr Allocator)) (path (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] path)]
+    (if (or (= n 0) (not (= (primitive/cast i64 (slice-get [u8] path 0)) 126)))
+        path
+        (let [home (env-or a "HOME" "")]
+          (cond (= (slice-len [u8] home) 0) path
+                (= n 1) home
+                (= (primitive/cast i64 (slice-get [u8] path 1)) 47)
+                  (join a home (substr path 1 n))
+                :else path)))))
+
+(defn project-issue-workflow [(projects (ptr (ArrayList Project))) (name (slice u8))] (-> (slice u8))
+  (let [n (al-len [Project] (load projects))
+        (mut i) 0
+        (mut found) "issues"]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (= (.name (al-elem [Project] projects (load i))) name)
+                  (set! found (.issue-workflow (al-elem [Project] projects (load i))))
+                  (break))
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; ---------------------------------------------------------------- issues
+
+;; An issue is a request against a codebase: a Markdown file under
+;; `<root>/.factory-issues`, whose front matter names the project it was filed
+;; against. It is not a run and has no journal. Running one hands it to a
+;; workflow as that run's context, which is exactly what `harness factory issue`
+;; does from a terminal.
+(defstruct Issue
+  [(project (slice u8))
+   (title (slice u8))
+   (file (slice u8))
+   ;; The issue as written, front matter removed: what the pane shows and what
+   ;; the worker will be handed.
+   (body (slice u8))])
+
+(defn issues-dir [(a (ptr Allocator)) (root (slice u8))] (-> (slice u8))
+  (join a root "/.factory-issues"))
+
+;; The index just past the front matter block, and the project it declared.
+;; Front matter is optional; a file without it is an issue that belongs to no
+;; project, which the rail shows rather than hides.
+(defn front-matter-project [(text (slice u8))] (-> (slice u8))
+  (if (not (starts-with text "---"))
+      ""
+      (let [n (slice-len [u8] text)
+            (mut at) (line-at text 0)
+            (mut found) ""]
+        (loop (if (>= (load at) n)
+                  (break)
+                  (let [start (+ (load at) 1)
+                        stop (line-at text start)
+                        row (substr text start (if (> stop n) n stop))]
+                    (cond (starts-with row "---") (break)
+                          (starts-with row "project:")
+                            (do
+                              (set! found (trim-spaces (substr row 8 (slice-len [u8] row))))
+                              (break))
+                          :else (set! at stop)))))
+        (load found))))
+
+(defn front-matter-end [(text (slice u8))] (-> i64)
+  (if (not (starts-with text "---"))
+      0
+      (let [n (slice-len [u8] text)
+            (mut at) (line-at text 0)
+            (mut end) 0]
+        (loop (if (>= (load at) n)
+                  (break)
+                  (let [start (+ (load at) 1)
+                        stop (line-at text start)
+                        row (substr text start (if (> stop n) n stop))]
+                    (if (starts-with row "---")
+                        (do (set! end (if (>= stop n) n (+ stop 1))) (break))
+                        (set! at stop)))))
+        (load end))))
+
+(defn trim-spaces [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)
+        (mut lo) 0
+        (mut hi) n]
+    (loop (if (or (>= (load lo) (load hi))
+                  (not (let [c (primitive/cast i64 (slice-get [u8] s (load lo)))]
+                         (or (= c 32) (or (= c 9) (or (= c 13) (= c 10)))))))
+              (break)
+              (set! lo (+ (load lo) 1))))
+    (loop (if (or (>= (load lo) (load hi))
+                  (not (let [c (primitive/cast i64 (slice-get [u8] s (- (load hi) 1)))]
+                         (or (= c 32) (or (= c 9) (or (= c 13) (= c 10)))))))
+              (break)
+              (set! hi (- (load hi) 1))))
+    (substr s (load lo) (load hi))))
+
+;; The first Markdown heading, which is the line a person wrote as the title.
+(defn heading-of [(text (slice u8)) (fallback (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] text)
+        (mut at) 0
+        (mut found) ""]
+    (loop (if (or (>= (load at) n) (> (slice-len [u8] (load found)) 0))
+              (break)
+              (let [stop (line-at text (load at))
+                    row (substr text (load at) stop)]
+                (when (starts-with row "# ")
+                  (set! found (trim-spaces (substr row 2 (slice-len [u8] row))))
+                  0)
+                (set! at (+ stop 1)))))
+    (if (= (slice-len [u8] (load found)) 0) fallback (load found))))
+
+;; The issue without its title line, for a pane that already shows the title.
+(defn body-after-heading [(body (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] body)
+        (mut at) 0]
+    (loop (if (>= (load at) n)
+              (break)
+              (let [stop (line-at body (load at))
+                    row (substr body (load at) stop)]
+                (if (starts-with row "# ")
+                    (do (set! at (if (>= stop n) n (+ stop 1))) (break))
+                    (if (= (slice-len [u8] (trim-spaces row)) 0)
+                        (set! at (+ stop 1))
+                        (break))))))
+    (trim-spaces (substr body (if (> (load at) n) n (load at)) n))))
+
+(defn read-issue [(a (ptr Allocator)) (root (slice u8)) (file (slice u8))] (-> (Option Issue))
+  (let [path (join a (join a (issues-dir a root) "/") file)]
+    (match (fs/read-file a path)
+      (Err [e] (None))
+      (Ok [text]
+          (let [issue (alloc/stack Issue)
+                body (substr text (front-matter-end text) (slice-len [u8] text))
+                declared (front-matter-project text)]
+            (set! (.project issue) declared)
+            (set! (.title issue) (heading-of body (worker-label a file)))
+            (set! (.file issue) path)
+            (set! (.body issue) body)
+            (Some (load issue)))))))
+
+(defn discover-issues [(a (ptr Allocator)) (root (slice u8))] (-> (ArrayList Issue))
+  (let [(mut out) (al-new [Issue] a)
+        files (dir/entries-with-suffix a (issues-dir a root) ".md")
+        n (al-len [(slice u8)] files)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (match (read-issue a root (al-get [(slice u8)] files (load i)))
+                  (Some [issue] (al-push! [Issue] (mut out) issue))
+                  (None [] 0))
+                (set! i (+ (load i) 1)))))
+    (load out)))
+
+;; Hand an issue to a workflow. This is `harness factory issue`, the same command
+;; a person would run, and the project comes from the issue's own front matter
+;; unless the caller names one.
+(defn issue-run-command [(a (ptr Allocator))
+                         (root (slice u8))
+                         (folder (slice u8))
+                         (issue (ptr Issue))] (-> (slice u8))
+  (let [(mut cmd) (sb-new a)]
+    (sb-push-str! (mut cmd) "cd ")
+    (sb-push-str! (mut cmd) root)
+    (sb-push-str! (mut cmd) " && exec ./harness factory issue ")
+    (sb-push-str! (mut cmd) folder)
+    (sb-push-str! (mut cmd) " --issue ")
+    (sb-push-str! (mut cmd) (.file issue))
+    (when (> (slice-len [u8] (.project issue)) 0)
+      (sb-push-str! (mut cmd) " --project ")
+      (sb-push-str! (mut cmd) (.project issue))
+      0)
+    (sb-finish! (mut cmd))))
+
+(defn start-issue-run! [(a (ptr Allocator))
+                        (root (slice u8))
+                        (folder (slice u8))
+                        (issue (ptr Issue))] (-> i64)
+  (spawn-shell a (logged a (issue-run-command a root folder issue) (log-path a root))))
+
+;; What the last started command printed. Empty until it prints something, which
+;; for a healthy run is the workspace and journal it chose.
+(defn read-log [(a (ptr Allocator)) (root (slice u8))] (-> (slice u8))
+  (match (fs/read-file a (log-path a root))
+    (Ok [text] text)
+    (Err [e] "")))
+
+;; A started run announces its workspace and journal on stdout before it does
+;; anything. Anything else on there is the reason it is not going to run.
+(defn log-is-refusal? [(text (slice u8))] (-> bool)
+  (and (> (slice-len [u8] text) 0) (not (starts-with text "factory workspace:"))))
+
+;; Show an issue: the workflow that would carry it out fills the middle pane with
+;; its steps, all queued, and the issue itself is what you read on the right.
+;; Nothing has run, so nothing claims to have.
+(defn load-issue! [(app (ptr App))
+                   (issue (ptr Issue))
+                   ;; "" when the project declares a workflow that is not on
+                   ;; disk. There is then nothing to run this with, and the pane
+                   ;; says so rather than showing an empty plan.
+                   (workflow (slice u8))
+                   (workers (ArrayList (slice u8)))] (-> i64)
+  (let [a (.alc app)
+        have-workflow (> (slice-len [u8] workflow) 0)]
+    (steps-clear! app)
+    (lines-clear! app)
+    (set! (.title app) (.title issue))
+    (set! (.factory app) "")
+    (set! (.journal app) "")
+    (when have-workflow
+      (let [count (al-len [(slice u8)] workers)
+            (mut i) 0]
+        (loop (if (>= (load i) count)
+                  (break)
+                  (do
+                    (push-step! app
+                                (mk-step (al-get [(slice u8)] workers (load i))
+                                         (- (load i) 1)
+                                         -1
+                                         (SQueued)
+                                         ""
+                                         0))
+                    (set! i (+ (load i) 1)))))
+        (let [(mut k) 0]
+          (loop (if (>= (load k) count)
+                    (break)
+                    (let [s (step-at app (load k))]
+                      (set! (.born s) 0.0)
+                      (set! (.changed s) 0.0)
+                      (set! k (+ (load k) 1))))))
+        0))
+    ;; The title is already the header of the pane; repeating it as the first
+    ;; line of the issue would be the same words twice.
+    (push-wrapped! app (You) (body-after-heading (.body issue)) 52)
+    (if have-workflow
+        (push-wrapped! app
+                       (Agent)
+                       ;; Built with the allocator rather than util's ring: a
+                       ;; ring cell is 64 bytes and this sentence is longer than
+                       ;; that, so a join would silently lose the end of it.
+                       (let [(mut said) (sb-new a)]
+                         (sb-push-str! (mut said) "Run hands this to ")
+                         (sb-push-str! (mut said) workflow)
+                         (sb-push-str! (mut said) ", which starts a real run against the project.")
+                         (sb-finish! (mut said)))
+                       52)
+        (push-wrapped! app
+                       (Agent)
+                       "No workflow is declared for this project, so there is nothing to run it with yet."
+                       52))
+    (relayout! app)
+    0))
+
+;; ---------------------------------------------------------------- speaking
+
+;; Say something to a run that is going. The harness gives every run an inbox --
+;; a file of one JSON message per line, at `.factory-inbox/<run-id>.jsonl` -- and
+;; the agent drains it at its next turn. Appending is the whole protocol, which
+;; is why this window can talk to a run it did not start.
+(defn inbox-path-for [(a (ptr Allocator)) (root (slice u8)) (run-id (slice u8))] (-> (slice u8))
+  (path3 a (join a root "/.factory-inbox/") run-id ".jsonl"))
+
+(defn say-to-run! [(a (ptr Allocator))
+                   (root (slice u8))
+                   (run-id (slice u8))
+                   (text (slice u8))] (-> bool)
+  (if (or (= (slice-len [u8] run-id) 0) (= (slice-len [u8] text) 0))
+      false
+      (let [(mut line) (sb-new a)]
+        (dir/make-dir a (join a root "/.factory-inbox") 493)
+        (sb-push-str! (mut line) "{\"version\":1,\"text\":\"")
+        (sb-push-str! (mut line) (json-escape a text))
+        (sb-push-str! (mut line) "\"}\n")
+        (dir/append-line! a (inbox-path-for a root run-id) (sb-finish! (mut line))))))
+
+;; ---------------------------------------------------------------- stopping
+
+;; A killed run writes no terminal record -- it is not there any more to write
+;; one -- so the fact that a person stopped it is recorded beside the journal
+;; instead. Without this the rail would show it as running forever.
+(defn stopped-marker [(a (ptr Allocator)) (journal (slice u8))] (-> (slice u8))
+  (join a journal ".stopped"))
+
+(defn mark-stopped! [(a (ptr Allocator)) (run (ptr Run))] (-> bool)
+  (match (fs/write-file a (stopped-marker a (.journal run)) "stopped from the window\n")
+    (Ok [n] true)
+    (Err [e] false)))
+
+(defn was-stopped? [(a (ptr Allocator)) (journal (slice u8))] (-> bool)
+  (dir/exists? a (stopped-marker a journal)))
+
+;; ------------------------------------------------- carrying a run on
+
+;; Saying something to a run that has already finished.
+;;
+;; There is nobody left to hear it -- the process is gone -- so the honest
+;; version of "keep talking" is to start the same workflow again, in the same
+;; place, with what you said as its instruction and the finished run's transcript
+;; named so the agent can see what it already did. The work is still in the
+;; workspace; this picks it up rather than starting over.
+(defn followup-path [(a (ptr Allocator)) (root (slice u8)) (workflow (slice u8)) (stamp i64)] (-> (slice u8))
+  (path3 a
+         (join a root "/.factory-followups/")
+         workflow
+         (join a "-" (join a (dec-str stamp) ".md"))))
+
+(defn write-followup! [(a (ptr Allocator))
+                       (root (slice u8))
+                       (run (ptr Run))
+                       (text (slice u8))] (-> (slice u8))
+  (let [dirpath (join a root "/.factory-followups")
+        path (followup-path a root (.workflow run) (dir/now-ms))
+        (mut md) (sb-new a)]
+    (dir/make-dir a dirpath 493)
+    (sb-push-str! (mut md) "# Carry on\n\n")
+    (sb-push-str! (mut md) text)
+    (sb-push-str! (mut md)
+                  "\n\nThis continues an earlier run of this same workflow, in this same workspace. What it did is already here; inspect the workspace before changing anything, and do the work above rather than starting the assignment over. The earlier run's transcript is at:\n\n")
+    (sb-push-str! (mut md) (.journal run))
+    (sb-push-str! (mut md) "\n")
+    (match (fs/write-file a path (sb-finish! (mut md)))
+      (Err [e] "")
+      (Ok [n] path))))
+
+(defn continue-run-command [(a (ptr Allocator))
+                            (root (slice u8))
+                            (folder (slice u8))
+                            (project (slice u8))
+                            (context (slice u8))] (-> (slice u8))
+  (let [(mut cmd) (sb-new a)]
+    (sb-push-str! (mut cmd) "cd ")
+    (sb-push-str! (mut cmd) root)
+    (sb-push-str! (mut cmd) " && exec ./harness factory run ")
+    (sb-push-str! (mut cmd) folder)
+    (sb-push-str! (mut cmd) " --project ")
+    (sb-push-str! (mut cmd) project)
+    ;; By flag: a bare path here would be read as the workspace, and the run
+    ;; would try to work inside the very file it was handed.
+    (sb-push-str! (mut cmd) " --context ")
+    (sb-push-str! (mut cmd) context)
+    (sb-finish! (mut cmd))))
+
+(defn start-followup! [(a (ptr Allocator))
+                       (root (slice u8))
+                       (folder (slice u8))
+                       (project (slice u8))
+                       (context (slice u8))] (-> i64)
+  (spawn-shell a (logged a (continue-run-command a root folder project context) (log-path a root))))

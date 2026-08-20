@@ -1,8 +1,12 @@
 [package]
 name = "coilgui"
 entry = "src/main.coil"
-source-roots = ["src"]
+source-roots = ["src", "tests"]
 
 [link]
 frameworks = ["AppKit", "CoreGraphics", "CoreText", "ImageIO", "CoreFoundation", "QuartzCore"]
 libs = ["objc"]
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]

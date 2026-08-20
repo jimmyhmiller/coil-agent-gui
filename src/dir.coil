@@ -22,6 +22,9 @@
 (extern access :cc c [(ptr i8) i32] (-> i32))
 (extern mkdir :cc c [(ptr i8) u32] (-> i32))
 (extern lseek :cc c [i32 i64 i32] (-> i64))
+(extern write :cc c [i32 (ptr i8) i64] (-> i64))
+(extern kill :cc c [i32 i32] (-> i32))
+(extern time :cc c [(ptr i64)] (-> i64))
 (extern close :cc c [i32] (-> i32))
 
 (defn dirent--public-name [(name Code)] (-> Code)
@@ -106,3 +109,38 @@
         (let [size (lseek fd 0 2)]
           (close fd)
           size))))
+
+;; Append one line to a file, creating it if needed. O_APPEND because the reader
+;; on the other end is a separate process reading the same file as it grows: a
+;; read-modify-write would truncate it under them, and two writers would lose a
+;; line between them.
+;;
+;; Darwin: O_WRONLY 1, O_APPEND 8, O_CREAT 512.
+(defn append-line! [(allocator (ptr Allocator)) (path (slice u8)) (text (slice u8))] (-> bool)
+  (let [c-path (str->cstr allocator path)
+        ;; coil.os already declares open with the C variadic signature; reusing
+        ;; it keeps one declaration of one symbol.
+        fd (os/open c-path (primitive/cast i32 521) 420)]
+    (if (< (primitive/cast i64 fd) 0)
+        false
+        (let [n (slice-len [u8] text)
+              wrote
+                (write fd
+                       (primitive/cast (ptr i8) (slice-data [u8] text))
+                       n)]
+          (close fd)
+          (= wrote n)))))
+
+;; Stop a process this window started. SIGTERM, not SIGKILL: the harness is
+;; ordinary software and deserves the chance to close its journal.
+(defn terminate! [(pid i64)] (-> bool)
+  (and (> pid 0) (= (primitive/cast i64 (kill (primitive/cast i32 pid) (primitive/cast i32 15))) 0)))
+
+;; Is it still there? Signal 0 asks without sending anything.
+(defn alive? [(pid i64)] (-> bool)
+  (and (> pid 0) (= (primitive/cast i64 (kill (primitive/cast i32 pid) (primitive/cast i32 0))) 0)))
+
+;; Wall-clock milliseconds. CACurrentMediaTime is monotonic since boot, which
+;; cannot be compared with a timestamp somebody else wrote into a filename.
+(defn now-ms [] (-> i64)
+  (* (time (primitive/cast (ptr i64) 0)) 1000))

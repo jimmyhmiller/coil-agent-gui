@@ -71,11 +71,50 @@
               (break)
               (let [it (al-elem [Item] (field app items) (load i))
                     selected (= (load i) (.selected app))]
-                (if (.head it)
+                (cond
+                  ;; The library is not in the rail. It is drawn in the middle
+                  ;; pane of a project, which is where running one happens, and
+                  ;; one list of workflows is enough.
+                  (item-library? it) 0
+                  (item-workflow? it) 0
+                  ;; A project heading is a row you can click: it is the place
+                  ;; everything else acts in, so it selects like anything else.
+                  (item-project? it)
                     (do
-                      (when (> (load i) 0)
-                        (store! y (+ (load y) 14.0))
+                      (when (> (load i) 0) (store! y (+ (load y) 16.0)) 0)
+                      (when (and (not selected) (= (load i) (.hover-item app)))
+                        (fill! cv 0.0 (load y) RAIL_W ROW (hover-wash))
                         0)
+                      (when selected
+                        (fill! cv 0.0 (load y) RAIL_W ROW (amber-wash))
+                        (fill! cv 0.0 (load y) 2.0 ROW (amber))
+                        0)
+                      (text-elided! cv
+                                    (field cv m12)
+                                    GUTTER_RAIL
+                                    (load y)
+                                    ROW
+                                    170.0
+                                    (if selected (ink1) (ink2))
+                                    (.project it))
+                      (set! y (+ (load y) ROW))
+                      0)
+                  ;; The library heading is structure, not a target.
+                  (item-note? it)
+                    (do
+                      (text-elided! cv
+                                    (field cv f11)
+                                    (+ GUTTER_RAIL 20.0)
+                                    (load y)
+                                    ROW
+                                    170.0
+                                    (line)
+                                    (.name it))
+                      (set! y (+ (load y) ROW))
+                      0)
+                  (item-heading? it)
+                    (do
+                      (store! y (+ (load y) 22.0))
                       (text-tracked! cv
                                      (field cv f11)
                                      GUTTER_RAIL
@@ -85,15 +124,18 @@
                                      1.4)
                       (set! y (+ (load y) 26.0))
                       0)
+                  :else
                     (let [top (load y)
                           name (.name it)
-                          ;; The open workflow reports live counts; every other
-                          ;; row reports what its last run left behind.
+                          ;; The open run reports live counts; every other row
+                          ;; reports what its journal already says.
                           meta
-                            (if (and (>= (.source it) 0) (= (.source it) (.open app)))
+                            (if (and (item-run? it) (= (.source it) (view-run app)))
                                 (if (= (step-count app) 0)
                                     ""
-                                    (join3 (dec-str (count-in-state app "done")) "/" (dec-str (step-count app))))
+                                    (join3 (dec-str (count-in-state app "done"))
+                                           "/"
+                                           (dec-str (step-count app))))
                                 (.meta it))
                           st (.state it)]
                       (when (and (not selected) (= (load i) (.hover-item app)))
@@ -103,7 +145,25 @@
                         (fill! cv 0.0 top RAIL_W ROW (amber-wash))
                         (fill! cv 0.0 top 2.0 ROW (amber))
                         0)
-                      (state-mark! cv st (+ GUTTER_RAIL 5.0) (+ top (/ ROW 2.0)) (.now app))
+                      ;; Three marks for three kinds of thing: a run wears its
+                      ;; state, an issue is an open square because nothing has
+                      ;; run, and a workflow is a definition — a hollow chevron
+                      ;; of nothing at all.
+                      (cond (item-issue? it)
+                              (do
+                                (box! cv (+ GUTTER_RAIL 1.5) (+ top (- (/ ROW 2.0) 3.5)) 7.0 7.0 (ink3))
+                                0)
+                            (item-workflow? it)
+                              (do
+                                (text-at! cv
+                                          (field cv m12)
+                                          (+ GUTTER_RAIL 1.0)
+                                          (+ top (+ (/ ROW 2.0) 4.0))
+                                          (ink3)
+                                          "›")
+                                0)
+                            :else
+                              (state-mark! cv st (+ GUTTER_RAIL 5.0) (+ top (/ ROW 2.0)) (.now app)))
                       (text-elided! cv
                                     (field cv f12)
                                     (+ GUTTER_RAIL 20.0)
@@ -125,7 +185,7 @@
                       0))
                 (set! i (+ (load i) 1)))))
     (hline! cv 0.0 (- h 42.0) RAIL_W (line))
-    (text-row! cv (field cv f11) GUTTER_RAIL (- h 42.0) 42.0 (ink3) "⌘N   new")
+    (text-row! cv (field cv f11) GUTTER_RAIL (- h 42.0) 42.0 (ink3) "⌘N workflow   ⌘I issue")
     (vline! cv (- RAIL_W HAIRLINE) 0.0 h (line))
     0))
 
@@ -307,18 +367,154 @@
     (vline! cv (- (+ x w) HAIRLINE) 0.0 h (line))
     0))
 
+;; ------------------------------------------------------------- run something
+
+;; With a project open, the middle pane is the question that project poses:
+;; what do you want to run here. The rows are the library, drawn from the same
+;; items the rail is built from, so there is one list of workflows and not two.
+(defn picker-top [] (-> f64) (+ HEADER 44.0))
+
+;; The middle pane is a list of things to pick when what is open poses a
+;; question: a project asks which workflow, and a workflow that needs an issue
+;; asks which issue.
+(defn picker-wants-issues? [(app (ptr App))] (-> bool)
+  (>= (view-workflow app) 0))
+
+(defn picker-row? [(app (ptr App)) (it (ptr Item))] (-> bool)
+  (if (picker-wants-issues? app) (item-issue? it) (item-workflow? it)))
+
+(defn draw-picker! [(cv (ptr Canvas)) (app (ptr App)) (x f64) (w f64) (h f64)] (-> i64)
+  (let [n (al-len [Item] (.items app))
+        (mut y) (picker-top)
+        (mut shown) 0
+        (mut i) 0]
+    (text-tracked! cv
+                   (field cv f11)
+                   (+ x GUTTER_PANE)
+                   (row-baseline (field cv f11) (+ HEADER 14.0) 22.0)
+                   (ink3)
+                   (if (picker-wants-issues? app)
+                       "run it on one of these"
+                       "run a workflow here")
+                   1.4)
+    (loop (if (>= (load i) n)
+              (break)
+              (let [it (al-elem [Item] (field app items) (load i))]
+                (when (picker-row? app it)
+                  (let [top (load y)
+                        hot (= (load i) (.hover-node app))]
+                    (when hot (fill! cv x top w ROW (hover-wash)) 0)
+                    (text-at! cv (field cv m12) (+ x GUTTER_PANE) (+ top (+ (/ ROW 2.0) 4.0)) (ink3) "›")
+                    (text-elided! cv
+                                  (field cv f13)
+                                  (+ x (+ GUTTER_PANE 20.0))
+                                  top
+                                  ROW
+                                  (- w 160.0)
+                                  (ink1)
+                                  (.name it))
+                    (text-row! cv
+                               (field cv f11)
+                               (text-right (field cv f11) (- (+ x w) GUTTER_PANE) (.meta it))
+                               top
+                               ROW
+                               (ink3)
+                               (.meta it))
+                    (set! y (+ (load y) ROW))
+                    (store! shown (+ (load shown) 1))
+                    0))
+                (set! i (+ (load i) 1)))))
+    (hline! cv x (- h 42.0) w (line))
+    (text-row! cv
+               (field cv f11)
+               (+ x GUTTER_PANE)
+               (- h 42.0)
+               42.0
+               (ink3)
+               (cond (and (picker-wants-issues? app) (= (load shown) 0))
+                       "no issues in this project yet · ⌘I writes one"
+                     (picker-wants-issues? app) "⌘I writes a new one"
+                     (= (load shown) 0) "no workflows yet · ⌘N writes one"
+                     :else "⌘N writes a new one"))
+    (vline! cv (- (+ x w) HAIRLINE) 0.0 h (line))
+    0))
+
+;; Which workflow row the pointer is over, as an index into the app's items so a
+;; click can open it through the same path the rail uses.
+(defn picker-hit [(app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> i64)
+  (if (or (< px (.rail p)) (>= px (.convo-x p)))
+      -1
+      (let [n (al-len [Item] (.items app))
+            (mut y) (picker-top)
+            (mut i) 0
+            (mut found) -1]
+        (loop (if (or (>= (load i) n) (>= (load found) 0))
+                  (break)
+                  (let [it (al-elem [Item] (field app items) (load i))]
+                    (when (picker-row? app it)
+                      (when (and (>= py (load y)) (< py (+ (load y) ROW)))
+                        (set! found (load i))
+                        0)
+                      (set! y (+ (load y) ROW))
+                      0)
+                    (set! i (+ (load i) 1)))))
+        (load found))))
+
 ;; ---------------------------------------------------------------- conversation
 
 (defn draw-line-reset! [(cv (ptr Canvas)) (v f64)] (-> f64)
   (canvas-alpha! cv 1.0)
   v)
 
-(defn draw-line! [(cv (ptr Canvas)) (app (ptr App)) (l (ptr Line)) (x f64) (w f64) (top-in f64)] (-> f64)
+;; Where a line's own text starts, which is not the same for every speaker: a
+;; result is indented under its tool call, and a continuation lines up with the
+;; body above it.
+(defn line-left [(l (ptr Line)) (x f64)] (-> f64)
+  (match (.who l) (Result [] (+ x 34.0)) (_ (+ x 20.0))))
+
+(defn line-face [(cv (ptr Canvas)) (l (ptr Line))] (-> (ptr Face))
+  (match (.who l) (Tool [] (field cv m13)) (_ (field cv f13))))
+
+;; The selection, painted behind the glyphs of one line. Every face here is
+;; fixed-pitch, so a character is an offset and a width rather than a measurement.
+(defn draw-selection! [(cv (ptr Canvas)) (app (ptr App)) (l (ptr Line)) (at i64) (top f64)] (-> i64)
+  (if (or (not (sel-active? app))
+          (or (< at (sel-first-line app)) (> at (sel-last-line app))))
+      0
+      (let [cells (text-cells (.text l))
+            from (if (= at (sel-first-line app)) (sel-first-cell app) 0)
+            to (if (= at (sel-last-line app)) (sel-last-cell app) cells)
+            lo (if (< from 0) 0 (if (> from cells) cells from))
+            hi (if (< to lo) lo (if (> to cells) cells to))
+            adv (.adv l)
+            left (.left l)]
+        (if (or (<= (- hi lo) 0) (<= adv 0.0))
+            0
+            (fill! cv
+                   (+ left (* adv (primitive/cast f64 lo)))
+                   top
+                   (* adv (primitive/cast f64 (- hi lo)))
+                   LINE_H
+                   (select-wash))))))
+
+(defn draw-line! [(cv (ptr Canvas))
+                  (app (ptr App))
+                  (l (ptr Line))
+                  (at i64)
+                  (x f64)
+                  (w f64)
+                  (top-in f64)] (-> f64)
   (let [top top-in
         text (.text l)
         trail (.trail l)
-        body-x (+ x 20.0)
+        body-x (line-left l x)
         room (- (- w 40.0) 20.0)]
+    ;; Record what is about to be drawn, so a click can find the character it
+    ;; landed on without a second copy of the layout.
+    (set! (.top l) top)
+    (set! (.left l) body-x)
+    (set! (.adv l) (.adv (line-face cv l)))
+    (draw-selection! cv app l at top)
     (draw-line-reset! cv
                       (match (.who l)
                         (You []
@@ -352,7 +548,7 @@
                         (Result []
                                 (do
                                   (elbow! cv (+ x 22.0) (+ top (/ LINE_H 2.0)) (ink3))
-                                  (text-elided! cv (field cv f13) (+ x 34.0) top LINE_H (- room 14.0) (ink3) text)
+                                  (text-elided! cv (field cv f13) body-x top LINE_H (- room 14.0) (ink3) text)
                                   (+ top LINE_H)))
                         (Pending []
                                  (do
@@ -373,6 +569,70 @@
                                 (text-elided! cv (field cv f13) body-x top LINE_H room (amber) text)
                                 (+ top LINE_H)))))))
 
+;; The composer wraps and grows.
+;;
+;; It used to be one line that elided: what you typed disappeared off the right
+;; while you were still typing it, which is no way to write a paragraph to
+;; somebody. Now it wraps at the pane's measure and grows upward, and the
+;; conversation above it moves up to make room.
+(const COMPOSER_PAD 18.0)
+(const COMPOSER_MAX_ROWS 8)
+
+;; How many characters fit on one row of the composer.
+(defn composer-columns [(cv (ptr Canvas)) (w f64)] (-> i64)
+  (let [room (- w (+ (* 2.0 GUTTER_PANE) 40.0))
+        adv (.adv (field cv f13))
+        columns (cast i64 (/ room adv))]
+    (if (< columns 8) 8 columns)))
+
+;; Where each row of the input starts, walking the text once: newlines break, and
+;; a row that fills up breaks at the last space before the edge.
+(defn composer-row-end [(text (slice u8)) (from i64) (columns i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        hard (+ from (prefix-bytes (subslice [u8] text from n) columns))
+        (mut at) from
+        (mut stop) -1]
+    ;; A newline always ends the row.
+    (loop (if (or (>= (load at) hard) (>= (load stop) 0))
+              (break)
+              (do
+                (when (= (cast i64 (slice-get [u8] text (load at))) 10)
+                  (store! stop (load at))
+                  0)
+                (set! at (+ (load at) 1)))))
+    (if (>= (load stop) 0)
+        (load stop)
+        (if (>= hard n)
+            n
+            ;; Break at the last space that fits, so a word is not cut in half.
+            (let [(mut back) hard]
+              (loop (if (or (<= (load back) from)
+                            (= (cast i64 (slice-get [u8] text (- (load back) 1))) 32))
+                        (break)
+                        (set! back (- (load back) 1))))
+              (if (> (load back) from) (load back) hard))))))
+
+(defn composer-rows [(cv (ptr Canvas)) (text (slice u8)) (w f64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        columns (composer-columns cv w)
+        (mut at) 0
+        (mut rows) 0]
+    (loop (if (or (>= (load at) n) (>= (load rows) COMPOSER_MAX_ROWS))
+              (break)
+              (let [stop (composer-row-end text (load at) columns)]
+                (set! rows (+ (load rows) 1))
+                (set! at (if (>= stop n)
+                             n
+                             (if (= (cast i64 (slice-get [u8] text stop)) 10)
+                                 (+ stop 1)
+                                 stop))))))
+    (if (< (load rows) 1) 1 (load rows))))
+
+;; The strip's height for the text it currently holds. Everything that lays out
+;; the conversation asks this rather than assuming one line.
+(defn composer-height [(cv (ptr Canvas)) (app (ptr App)) (w f64)] (-> f64)
+  (+ 34.0 (* LINE_H (cast f64 (composer-rows cv (al-slice [u8] (.input app)) w)))))
+
 (defn draw-composer! [(cv (ptr Canvas))
                       (app (ptr App))
                       (x f64)
@@ -380,23 +640,61 @@
                       (h f64)
                       (hint (slice u8))
                       (placeholder (slice u8))] (-> i64)
-  (let [top (- h 52.0)
+  (let [height (composer-height cv app w)
+        top (- h height)
         text (al-slice [u8] (.input app))
         base (+ x GUTTER_PANE)
-        empty (= (slice-len [u8] text) 0)]
-    (hline! cv x top w (line))
+        empty (= (slice-len [u8] text) 0)
+        ;; A click here, or a keystroke, lights the strip and fades. Typing has
+        ;; always gone to this line whether or not you clicked it; what was
+        ;; missing was the line saying so.
+        lit (ease-out (phase (.now app) (.composer-lit app) 0.45))
+        recent (< lit 1.0)]
+    (when recent (fill! cv x top w height (mix (amber-wash) (ground) lit)) 0)
+    ;; The rule above the composer brightens with it, so the whole strip reads as
+    ;; one thing rather than a line with a cursor loose beneath it. Two pixels
+    ;; while it is lit: a hairline that changes colour is not a change anyone
+    ;; sees at the bottom of a window they are not looking at yet.
+    (if recent
+        (fill! cv x top w 2.0 (mix (amber) (line) lit))
+        (hline! cv x top w (line)))
     (caret! cv (+ base 4.0) (+ top 26.0) (amber))
-    (let [tw
-            (if empty
-                ;; The placeholder starts past the cursor rather than under it.
-                (do
-                  (text-elided! cv (field cv f13) (+ base 36.0) top 52.0 (- w 240.0) (line) placeholder)
-                  0.0)
-                (text-elided! cv (field cv f13) (+ base 18.0) top 52.0 (- w 200.0) (ink1) text))]
-      ;; The cursor does not blink. It is a position, not an alarm: a blinking
-      ;; block is movement the user did not cause, in the one place they are
-      ;; already looking.
-      (fill! cv (+ (+ base 20.0) tw) (+ top 18.0) 8.0 16.0 (amber)))
+    (if empty
+        (do
+          ;; The placeholder starts past the cursor rather than under it.
+          (text-row! cv (field cv f13) (+ base 36.0) top 52.0 (line) placeholder)
+          (fill! cv (+ base 20.0) (+ top 18.0) 8.0 16.0 (amber))
+          0)
+        ;; Every row of what you typed, wrapped at the measure, with the cursor
+        ;; after the last character rather than after the last row.
+        (let [n (slice-len [u8] text)
+              columns (composer-columns cv w)
+              (mut at) 0
+              (mut row) 0
+              (mut cursor-x) (+ base 20.0)
+              (mut cursor-y) (+ top COMPOSER_PAD)]
+          (loop (if (or (>= (load at) n) (>= (load row) COMPOSER_MAX_ROWS))
+                    (break)
+                    (let [stop (composer-row-end text (load at) columns)
+                          line-text (subslice [u8] text (load at) (if (> stop n) n stop))
+                          y (+ top (+ COMPOSER_PAD (* LINE_H (cast f64 (load row)))))
+                          width (text-at! cv (field cv f13) (+ base 20.0) (+ y 15.0) (ink1) line-text)]
+                      (set! cursor-x (+ (+ base 20.0) width))
+                      (set! cursor-y y)
+                      (set! row (+ (load row) 1))
+                      (set! at (if (>= stop n)
+                                   n
+                                   (if (= (cast i64 (slice-get [u8] text stop)) 10)
+                                       (+ stop 1)
+                                       stop))))))
+          ;; A trailing newline puts the cursor on the next row, where the next
+          ;; character will actually go.
+          (when (and (> n 0) (= (cast i64 (slice-get [u8] text (- n 1))) 10))
+            (set! cursor-x (+ base 20.0))
+            (set! cursor-y (+ (load cursor-y) LINE_H))
+            0)
+          (fill! cv (load cursor-x) (+ (load cursor-y) 2.0) 8.0 16.0 (amber))
+          0))
     ;; The hint is the first thing to go when the pane is narrow: it is a
     ;; reminder, and the thing you are typing is not.
     (when (and (> (slice-len [u8] hint) 0)
@@ -404,8 +702,8 @@
       (text-row! cv
                  (field cv f11)
                  (text-right (field cv f11) (- (+ x w) GUTTER_PANE) hint)
-                 top
-                 52.0
+                 (- h 34.0)
+                 34.0
                  (ink3)
                  hint)
       0)
@@ -422,7 +720,7 @@
 (defn draw-convo! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (x f64) (w f64) (h f64)] (-> i64)
   (let [n (al-len [Line] (.lines app))
         top (+ HEADER 22.0)
-        bottom (- h 66.0)
+        bottom (- h (+ (composer-height cv app w) 14.0))
         room (- bottom top)
         (mut total) 0.0
         (mut i) 0]
@@ -457,12 +755,18 @@
             (if (< (load total) room)
                 top
                 (+ (- bottom (load total)) (.scroll app)))]
-      (clip-push! cv x HEADER w (- (- h HEADER) 52.0))
+      (let [(mut k) 0]
+        (loop (if (>= (load k) n)
+                  (break)
+                  (do
+                    (set! (.top (al-elem [Line] (field app lines) (load k))) -1.0)
+                    (set! k (+ (load k) 1))))))
+      (clip-push! cv x HEADER w (- (- h HEADER) (composer-height cv app w)))
       (set! i 0)
       (loop (if (>= (load i) n)
                 (break)
                 (let [l (al-elem [Line] (field app lines) (load i))
-                      next (draw-line! cv app l (+ x GUTTER_PANE) (- w GUTTER_PANE) (load y))
+                      next (draw-line! cv app l (load i) (+ x GUTTER_PANE) (- w GUTTER_PANE) (load y))
                       follows
                         (if (>= (+ (load i) 1) n)
                             false
@@ -491,16 +795,36 @@
                     x
                     w
                     h
-                    (cond (= (step-count app) 0) ""
-                          (> (count-in-state app "asks") 0) "answer, or say what to do instead"
-                          (not (started? app)) "keep talking to change the plan"
-                          (> (count-in-state app "running") 0) "the workflow keeps running"
-                          (= (count-in-state app "done") (step-count app)) "a change starts the next run"
-                          :else "keep talking")
-                    (if (started? app)
-                        (join2 "message " (.name (step-at app (.focus app))))
-                        "message the plan"))
+                    ;; No hint here. The composer says what it is for in its own
+                    ;; placeholder; a second sentence beside it was noise.
+                    ""
+                    (cond (>= (view-issue app) 0) "filed · press Run"
+                          (>= (view-workflow app) 0) "a definition"
+                          (>= (view-project app) 0) "⌘I files an issue here"
+                          (and (>= (view-run app) 0) (> (count-in-state app "running") 0))
+                            "say something to the agent working now · ⇧⏎ for a new line"
+                          (>= (view-run app) 0) "carry it on — this starts another run here"
+                          :else "message"))
     0))
+
+;; What the Run control says, in one place, because the label, the target it
+;; hit-tests against, and whether there is a button at all must all be the same
+;; decision. "" means there is nothing to run from here.
+;;
+;; A workflow runs *in* the current project, so the button names it. An issue is
+;; already filed in one, so it does not.
+(defn run-label [(app (ptr App))] (-> (slice u8))
+  (cond (= (slice-len [u8] (.project-label app)) 0) ""
+        ;; A workflow that works on an issue has no Run of its own: the pane
+        ;; below asks which issue, and running is what you do to the pair.
+        (needs-input? app) ""
+        (>= (view-workflow app) 0) (join2 "Run in " (.project-label app))
+        (>= (view-issue app) 0) "Run this issue"
+        :else ""))
+
+;; The other control in the header, and the only destructive one in the window.
+(defn stop-label [(app (ptr App))] (-> (slice u8))
+  (if (.can-stop app) "Stop" ""))
 
 (defn run-button! [(cv (ptr Canvas)) (right f64) (top f64) (label (slice u8)) (hot bool)] (-> f64)
   (let [w (+ (text-width (field cv f11) label) 24.0)
@@ -513,11 +837,7 @@
 
 (defn draw-header! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (split bool)] (-> i64)
   (let [n (step-count app)
-        started
-          (> (+ (count-in-state app "running")
-                (+ (count-in-state app "done")
-                   (+ (count-in-state app "failed") (count-in-state app "asks"))))
-             0)
+        label (run-label app)
         title (.title app)
         w (.w p)
         graph-w (.graph p)]
@@ -533,10 +853,10 @@
     (if (not split)
         (do (text-row! cv (field cv f13) (+ (.rail p) GUTTER_PANE) 0.0 HEADER (ink3) title) 0)
         (let [mid-right (+ (.rail p) graph-w)]
-          (text-elided! cv (field cv m13) (+ (.rail p) GUTTER_PANE) 0.0 HEADER (- graph-w 180.0) (ink1) title)
-          (if (and (> n 0) (not started))
-              (do (run-button! cv (- mid-right GUTTER_PANE) 0.0 (join3 "Run " (dec-str n) " steps") (.hover-run app)) 0)
-              (do
+          (text-elided! cv (field cv m13) (+ (.rail p) GUTTER_PANE) 0.0 HEADER (- graph-w 200.0) (ink1) title)
+          (if (> (slice-len [u8] label) 0)
+              (do (run-button! cv (- mid-right GUTTER_PANE) 0.0 label (.hover-run app)) 0)
+              (when (and (>= (view-run app) 0) (> n 0))
                 (text-row! cv
                            (field cv f11)
                            (text-right (field cv f11)
@@ -547,51 +867,53 @@
                            (ink3)
                            (join3 (dec-str (count-in-state app "done")) "/" (dec-str n)))
                 0))
-          (if (not (started? app))
-              (do
-                (text-row! cv (field cv m13) (+ mid-right GUTTER_PANE) 0.0 HEADER (ink1) "plan")
-                (text-row! cv
-                           (field cv f11)
-                           (text-right (field cv f11) (- w GUTTER_PANE) "not started")
-                           0.0
-                           HEADER
-                           (ink3)
-                           "not started")
-                0)
-              (when (> n 0)
-                (let [f (step-at app (.focus app))
-                      machine (.machine f)
-                      st (.state f)
-                      name-w
-                        (text-elided! cv
-                                      (field cv m13)
-                                      (+ mid-right GUTTER_PANE)
-                                      0.0
-                                      HEADER
-                                      220.0
-                                      (ink1)
-                                      (.name f))]
-                  (when (> (slice-len [u8] machine) 0)
-                    (hop! cv (+ (+ mid-right GUTTER_PANE) (+ name-w 12.0)) (/ HEADER 2.0) (ink3))
-                    (text-row! cv
-                               (field cv f11)
-                               (+ (+ mid-right GUTTER_PANE) (+ name-w 23.0))
-                               0.0
-                               HEADER
-                               (ink3)
-                               machine)
-                    0)
-                  (let [word (if (= (state-word st) "asks") "waiting on you" (state-word st))
-                        secs (.secs f)
-                        label (if (> secs 0) (join3 word " " (clock-str secs)) word)]
-                    (text-row! cv
-                               (field cv f11)
-                               (text-right (field cv f11) (- w GUTTER_PANE) label)
-                               0.0
-                               HEADER
-                               (state-color st)
-                               label)
-                    0))))
+          ;; The right pane names what it is showing and, beside it, the one
+          ;; fact that matters about it.
+          (let [reading
+                  (cond (>= (view-run app) 0) (if (> n 0) (.name (step-at app (.focus app))) "run")
+                        (>= (view-workflow app) 0) "workflow"
+                        (>= (view-issue app) 0) "issue"
+                        (>= (view-project app) 0) "project"
+                        :else "")
+                aside
+                  (cond (>= (view-run app) 0)
+                          (if (> n 0)
+                              (let [st (.state (step-at app (.focus app)))]
+                                (if (= (state-word st) "asks") "waiting on you" (state-word st)))
+                              "")
+                        (needs-input? app) "needs an issue"
+                        (>= (view-workflow app) 0) "has not run here"
+                        (>= (view-issue app) 0) (.project-label app)
+                        (>= (view-project app) 0) "everything that ran here"
+                        :else "")
+                tint
+                  (if (and (>= (view-run app) 0) (> n 0))
+                      (state-color (.state (step-at app (.focus app))))
+                      (ink3))]
+            (text-elided! cv
+                          (field cv m13)
+                          (+ mid-right GUTTER_PANE)
+                          0.0
+                          HEADER
+                          220.0
+                          (ink1)
+                          reading)
+            ;; Stop, or what is going on, in the same corner: a run that can be
+            ;; stopped is one you are watching, and the two never both apply.
+            (if (> (slice-len [u8] (stop-label app)) 0)
+                (do
+                  (run-button! cv (- w GUTTER_PANE) 0.0 (stop-label app) (.hover-run app))
+                  0)
+                (when (> (slice-len [u8] aside) 0)
+                  (text-row! cv
+                             (field cv f11)
+                             (text-right (field cv f11) (- w GUTTER_PANE) aside)
+                             0.0
+                             HEADER
+                             tint
+                             aside)
+                  0))
+            0)
           0))
     0))
 
@@ -611,7 +933,9 @@
                top
                22.0
                (ink3)
-               "describe what should happen. this writes a workflow you can run.")
+               (if (issue-composer? app)
+                   "talk about what is wrong. an agent reads the project and writes the issues."
+                   "describe what should happen. an agent designs the workflow and writes it."))
     (caret! cv (+ left 5.0) (+ top 62.0) (amber))
     (let [tw
             (text-elided! cv
@@ -621,30 +945,102 @@
                           24.0
                           (- box-w 40.0)
                           (if empty (line) (ink1))
-                          (if empty "what should this do?" text))]
+                          (if empty
+                              (if (issue-composer? app) "what is going wrong?" "what should this do?")
+                              text))]
       (when (not empty)
         (fill! cv (+ (+ left 22.0) tw) (+ top 55.0) 8.0 16.0 (amber))
         0))
     (hline! cv left (+ top 82.0) box-w (line))
     (text-row! cv (field cv f11) left (+ top 92.0) 22.0 (ink3) "⏎ send · ⇧⏎ newline")
+    (text-row! cv
+               (field cv f11)
+               left
+               (+ top 114.0)
+               22.0
+               (ink3)
+               (if (issue-composer? app)
+                   (join2 "backlog for " (.project-label app))
+                   "a workflow belongs to no project; you choose one when you run it"))
     0))
 
 ;; ---------------------------------------------------------------- whole window
 
 (defn draw-app! [(cv (ptr Canvas)) (app (ptr App)) (w f64) (h f64)] (-> i64)
-  (let [split (> (step-count app) 0)
+  ;; The one-prompt screen belongs to writing something new. Everything else --
+  ;; a project with nothing in it included -- is the three panes, because the
+  ;; rail is how you get anywhere and it must never disappear.
+  (let [split (not (view-nothing? app))
         geom (alloc/stack Panes)]
     (set! geom (panes w h))
     (fill! cv 0.0 0.0 w h (ground))
     (if split
         (do
-          (draw-graph! cv app geom (.rail geom) (.graph geom) h)
+          (if (or (>= (view-project app) 0) (needs-input? app))
+              (draw-picker! cv app (.rail geom) (.graph geom) h)
+              (draw-graph! cv app geom (.rail geom) (.graph geom) h))
           (draw-convo! cv app geom (.convo-x geom) (.convo geom) h)
           0)
         (draw-new! cv app geom (.rail geom) (- w (.rail geom)) h))
     (draw-rail! cv app h)
     (draw-header! cv app geom split)
     0))
+
+;; The line under a point, or -1. Lines carry the rect they were last drawn in,
+;; so this answers about what is on screen rather than about the layout rules.
+;; A line is only hit-testable where it is actually visible. The conversation is
+;; drawn into a clip that starts below the header, so lines scrolled up sit at
+;; coordinates behind it: real positions, nothing you can see or point at.
+(defn line-visible? [(l (ptr Line))] (-> bool)
+  (>= (.top l) HEADER))
+
+(defn convo-line-at [(app (ptr App)) (py f64)] (-> i64)
+  (let [n (al-len [Line] (.lines app))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (let [l (al-elem [Line] (field app lines) (load i))]
+                (when (and (line-visible? l)
+                           (and (>= py (.top l)) (< py (+ (.top l) LINE_H))))
+                  (set! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+;; The character of that line under a point, clamped to its ends: a drag that
+;; runs off the right of a line selects to the end of it, which is what dragging
+;; through text does everywhere else.
+(defn convo-cell-at [(app (ptr App)) (at i64) (px f64)] (-> i64)
+  (let [l (al-elem [Line] (field app lines) at)
+        cells (text-cells (.text l))
+        adv (.adv l)]
+    (if (<= adv 0.0)
+        0
+        (let [over (/ (- px (.left l)) adv)
+              cell (cast i64 (+ over 0.5))]
+          (if (< cell 0) 0 (if (> cell cells) cells cell))))))
+
+;; The line nearest a point above or below everything drawn, so a drag that
+;; leaves the pane keeps selecting instead of stopping.
+(defn convo-line-near [(app (ptr App)) (py f64)] (-> i64)
+  (let [n (al-len [Line] (.lines app))
+        (mut i) 0
+        (mut first-drawn) -1
+        (mut last-drawn) -1]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [l (al-elem [Line] (field app lines) (load i))]
+                (when (line-visible? l)
+                  (when (< (load first-drawn) 0) (set! first-drawn (load i)) 0)
+                  (set! last-drawn (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (if (< (load first-drawn) 0)
+        -1
+        (if (< py (.top (al-elem [Line] (field app lines) (load first-drawn))))
+            (load first-drawn)
+            (load last-drawn)))))
 
 ;; ---------------------------------------------------------------- hit testing
 ;;
@@ -660,17 +1056,25 @@
     (loop (if (or (>= (load i) n) (>= (load found) 0))
               (break)
               (let [it (al-elem [Item] (field app items) (load i))]
-                (if (.head it)
-                    (do
-                      (when (> (load i) 0) (set! top (+ (load top) 14.0)) 0)
-                      (set! top (+ (load top) 26.0))
-                      0)
-                    (do
-                      (when (and (>= y (load top)) (< y (+ (load top) ROW)))
-                        (set! found (load i))
-                        0)
-                      (set! top (+ (load top) ROW))
-                      0))
+                (cond (item-library? it) 0
+                      (item-workflow? it) 0
+                      (item-project? it)
+                        (do
+                          (when (> (load i) 0) (set! top (+ (load top) 16.0)) 0)
+                          (when (and (>= y (load top)) (< y (+ (load top) ROW)))
+                            (set! found (load i))
+                            0)
+                          (set! top (+ (load top) ROW))
+                          0)
+                      (item-note? it) (do (set! top (+ (load top) ROW)) 0)
+                      (item-heading? it) (do (set! top (+ (load top) 48.0)) 0)
+                      :else
+                        (do
+                          (when (and (>= y (load top)) (< y (+ (load top) ROW)))
+                            (set! found (load i))
+                            0)
+                          (set! top (+ (load top) ROW))
+                          0))
                 (set! i (+ (load i) 1)))))
     (load found)))
 
@@ -696,10 +1100,36 @@
 
 ;; The Run control is the only target in the header, and it exists only while
 ;; there is a plan that has not started.
-(defn run-hit [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> bool)
-  (if (or (= (step-count app) 0) (started? app))
+;; Both header controls sit in the same place, so they are hit-tested the same
+;; way and only one of them exists at a time.
+(defn header-button-hit [(cv (ptr Canvas))
+                         (app (ptr App))
+                         (p (ptr Panes))
+                         (label (slice u8))
+                         (px f64)
+                         (py f64)] (-> bool)
+  (if (= (slice-len [u8] label) 0)
       false
-      (let [label (join3 "Run " (dec-str (step-count app)) " steps")
+      (let [w (+ (text-width (field cv f11) label) 24.0)
+            right (- (+ (.rail p) (.graph p)) GUTTER_PANE)]
+        (and (and (>= px (- right w)) (< px right))
+             (and (>= py 13.0) (< py 35.0))))))
+
+;; Stop lives in the right-hand pane's header, beside the transcript it is going
+;; to interrupt -- that is where you are looking when you decide to stop it.
+(defn stop-hit [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> bool)
+  (let [label (stop-label app)]
+    (if (= (slice-len [u8] label) 0)
+        false
+        (let [w (+ (text-width (field cv f11) label) 24.0)
+              right (- (.w p) GUTTER_PANE)]
+          (and (and (>= px (- right w)) (< px right))
+               (and (>= py 13.0) (< py 35.0)))))))
+
+(defn run-hit [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (px f64) (py f64)] (-> bool)
+  (if (> (slice-len [u8] (stop-label app)) 0)
+      false
+      (let [label (run-label app)
             w (+ (text-width (field cv f11) label) 24.0)
             right (- (+ (.rail p) (.graph p)) GUTTER_PANE)]
         (and (and (>= px (- right w)) (< px right))

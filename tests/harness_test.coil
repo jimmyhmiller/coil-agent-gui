@@ -1,0 +1,77 @@
+;; The window reads a lot of files somebody else wrote: manifests, journals,
+;; issues with front matter. These are the parts where being wrong is quiet --
+;; a run filed under the wrong project, an issue whose body loses its first
+;; paragraph -- so they are the parts with tests.
+(module coilgui-harness-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coilgui.harness" :as harness)
+
+(deftest a-run-belongs-to-the-project-whose-checkout-it-ran-in
+         (let [allocator (malloc-allocator)
+               (mut projects) (al-new [harness/Project] allocator)
+               (mut one) (zeroed harness/Project)]
+           (set! (.name one) "snake")
+           (set! (.path one) "/code/snake")
+           (al-push! [harness/Project] (mut projects) (load one))
+           (assert (= (harness/workspace-project (mut projects) "/code/snake") "snake"))
+           ;; A scratch workspace *inside* a checkout is not that project. Matching
+           ;; a prefix filed every `.factory-workspaces` run under whatever
+           ;; happened to contain it, which is fifteen runs a project never had.
+           (assert (= (harness/workspace-project (mut projects)
+                                                 "/code/snake/.factory-workspaces/x-1")
+                      ""))
+           (assert (= (harness/workspace-project (mut projects) "/code/other") ""))))
+
+(deftest an-issue-names-its-project-in-front-matter
+         (assert (= (harness/front-matter-project "---\nproject: snake\n---\n\n# Title\n")
+                    "snake"))
+         (assert (= (harness/front-matter-project "# Title\n\nno front matter here\n") ""))
+         (assert (= (harness/front-matter-project "---\nother: 1\n---\n\n# Title\n") "")))
+
+(deftest an-issue-body-starts-after-its-front-matter-and-title
+         (let [text "---\nproject: snake\n---\n\n# It broke\n\nHere is how.\n"
+               body (substr text (harness/front-matter-end text) (slice-len [u8] text))]
+           (assert (= (harness/heading-of body "fallback") "It broke"))
+           ;; The pane shows the title in its header, so the body it displays
+           ;; must not repeat it.
+           (assert (= (harness/body-after-heading body) "Here is how."))))
+
+(deftest a-title-falls-back-to-the-file-name
+         (let [allocator (malloc-allocator)]
+           (assert (= (harness/heading-of "no heading here\n" "snake wrapping") "snake wrapping"))
+           (assert (= (harness/worker-label allocator "02-engine-and-tests.md") "engine and tests"))))
+
+(deftest a-run-id-comes-from-the-run-s-own-first-record
+         (let [allocator (malloc-allocator)
+               journal "{\"event\":\"factory.run.created\",\"run_id\":\"factory-x-17\",\"payload\":{\"workspace\":\"/code/snake\"}}\n{\"event\":\"run.started\"}\n"]
+           (assert (= (harness/journal-run-id allocator journal) "factory-x-17"))
+           (assert (= (harness/journal-workspace allocator journal) "/code/snake"))
+           (assert (= (harness/journal-run-id allocator "") ""))))
+
+(deftest a-slug-is-a-directory-name-and-nothing-else
+         (let [allocator (malloc-allocator)]
+           (assert (= (harness/slugify allocator "Add a rare special fruit")
+                      "add-a-rare-special-fruit"))
+           (assert (= (harness/slugify allocator "  Trailing punctuation!!  ")
+                      "trailing-punctuation"))
+           ;; Long titles are cut at a word, never mid-word.
+           (let [long (harness/slugify allocator
+                                       "make the window remember its size between launches")]
+             (assert (< (slice-len [u8] long) 30))
+             (assert (not (= (slice-get [u8] long (- (slice-len [u8] long) 1))
+                             (cast u8 45)))))))
+
+(deftest json-in-a-message-survives-being-written
+         (let [allocator (malloc-allocator)]
+           (assert (= (harness/json-escape allocator "say \"this\"") "say \\\"this\\\""))
+           (assert (= (harness/json-escape allocator "two\nlines") "two\\nlines"))))
+
+(deftest a-journal-string-comes-back-as-what-was-written
+         (let [allocator (malloc-allocator)]
+           (assert (= (harness/unescape allocator "one\\ntwo") "one\ntwo"))
+           (assert (= (harness/first-line "first\nsecond") "first"))))

@@ -30,6 +30,15 @@
    (pid i64)
    (ready bool)])
 
+;; A port of this checkout's own, so a service started for one harness is never
+;; mistaken for another's. The window reuses whatever already answers on its
+;; port with its token -- which is right when it is the same checkout and quietly
+;; wrong when it is not: the agent's file tools are rooted where the service was
+;; started, so a shared port would write one project's workflows into another.
+(defn port-for-root [(root (slice u8))] (-> i64)
+  (let [spread (% (str-hash root) 200)]
+    (+ 8790 (if (< spread 0) (- 0 spread) spread))))
+
 (defn base-url [(a (ptr Allocator)) (svc (ptr Service)) (path (slice u8))] (-> (slice u8))
   (let [(mut out) (sb-new a)]
     (sb-push-str! (mut out) "http://127.0.0.1:")
@@ -96,7 +105,16 @@
   (set! (.port svc) port)
   (set! (.token svc) (make-token a seed))
   (set! (.root svc) root)
-  (set! (.journal svc) (join3 root "/.coil-gui-service-" (join2 (dec-str seed) ".jsonl")))
+  ;; Built with the allocator, not util's ring: a ring cell is 64 bytes, and a
+  ;; checkout path plus a filename is routinely longer than that. A truncated
+  ;; path is a service that cannot open its journal and dies saying so.
+  (set! (.journal svc)
+        (let [(mut path) (sb-new a)]
+          (sb-push-str! (mut path) root)
+          (sb-push-str! (mut path) "/.coil-gui-service-")
+          (sb-push-str! (mut path) (dec-str seed))
+          (sb-push-str! (mut path) ".jsonl")
+          (sb-finish! (mut path))))
   (set! (.pid svc) -1)
   (set! (.ready svc) false)
   0)
