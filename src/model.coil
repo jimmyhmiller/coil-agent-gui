@@ -216,6 +216,13 @@
    ;; nothing on screen reads as a click that did not land, even when typing
    ;; would have gone there all along.
    (composer-lit f64)
+   ;; How many characters fit on a line of the conversation, measured from the
+   ;; pane rather than assumed. Text was wrapped at a constant while the pane
+   ;; drew fewer columns, so every long line lost its tail to an ellipsis.
+   (wrap-cols i64)
+   ;; The width the lines currently in hand were wrapped at, so a resize can be
+   ;; noticed and the view rebuilt.
+   (lines-cols i64)
    ;; How far back from the end of the conversation the view is scrolled, in
    ;; points. Zero means pinned to the latest line, which is where a live run
    ;; wants to be.
@@ -400,6 +407,8 @@
   (set! (.pid-run-id app) "")
   (set! (.can-stop app) false)
   (set! (.composer-lit app) 0.0)
+  (set! (.wrap-cols app) 52)
+  (set! (.lines-cols app) 52)
           0))))
 
 ;; Everything that enters the interface is stamped with when it arrived, which
@@ -533,6 +542,8 @@
   (set! (.pid-run-id app) "")
   (set! (.can-stop app) false)
   (set! (.composer-lit app) 0.0)
+  (set! (.wrap-cols app) 52)
+  (set! (.lines-cols app) 52)
   (set! (.scroll app) 0.0)
   (set! (.scroll-max app) 0.0)
   (set! (.anchor app) -1.0)
@@ -554,6 +565,12 @@
           (slice-new [u8] p n)))))
 
 ;; Wrap on spaces at `width` characters, first line marked, the rest continuations.
+;; Wrap at whatever the pane can actually draw. Callers pass the app's measure
+;; rather than a number they picked.
+(defn wrap-width [(app (ptr App))] (-> i64)
+  (let [cols (.wrap-cols app)]
+    (if (< cols 16) 16 cols)))
+
 (defn push-wrapped! [(app (ptr App)) (who Speaker) (text (slice u8)) (width i64)] (-> i64)
   (let [n (slice-len [u8] text)
         (mut start) 0

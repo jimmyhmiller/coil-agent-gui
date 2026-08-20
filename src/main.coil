@@ -268,6 +268,9 @@
 (defn open-project! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
   (when (and (>= at 0) (< at (project-count world)))
     (set! (.project app) at)
+    ;; Opening something ends whatever you were composing: the panes belong to
+    ;; the thing you just picked, not to a conversation you have left.
+    (set! (.compose app) (ComposeWorkflow))
     (set! (.open-needs-input app) false)
     (set! (.chosen app) -1)
     (set! (.view app) (ViewProject at))
@@ -278,20 +281,23 @@
     (set! (.journal app) "")
     (scroll-reset! app)
     (let [p (project-at world at)]
-      (push-wrapped! app (Cont) (.path p) 52)
+      (push-wrapped! app (Cont) (.path p) (wrap-width app))
       (when (> (slice-len [u8] (.summary p)) 0)
-        (push-wrapped! app (Cont) (.summary p) 52)
+        (push-wrapped! app (Cont) (.summary p) (wrap-width app))
         0)
       (push-wrapped! app
                      (Cont)
                      "Pick a workflow to run it here. ⌘I files an issue in this project; ⌘N writes a new workflow."
-                     52)
+                     (wrap-width app))
       0)
     0)
   0)
 
 (defn open-run! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
   (when (and (>= at 0) (< at (al-len [harness/Run] (.runs world))))
+    ;; Opening something ends whatever you were composing: the panes belong to
+    ;; the thing you just picked, not to a conversation you have left.
+    (set! (.compose app) (ComposeWorkflow))
     (let [r (al-elem [harness/Run] (field world runs) at)
           wi (harness/workflow-index (field world flows) (.workflow r))
           workers
@@ -311,6 +317,9 @@
 
 (defn open-workflow! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
   (when (and (>= at 0) (< at (al-len [harness/Workflow] (.flows world))))
+    ;; Opening something ends whatever you were composing: the panes belong to
+    ;; the thing you just picked, not to a conversation you have left.
+    (set! (.compose app) (ComposeWorkflow))
     (harness/load-workflow! app (al-elem [harness/Workflow] (field world flows) at))
     (set! (.view app) (ViewWorkflow at))
     (set! (.open-needs-input app)
@@ -330,6 +339,9 @@
 
 (defn open-issue! [(app (ptr App)) (world (ptr World)) (at i64)] (-> i64)
   (when (and (>= at 0) (< at (al-len [harness/Issue] (.issues world))))
+    ;; Opening something ends whatever you were composing: the panes belong to
+    ;; the thing you just picked, not to a conversation you have left.
+    (set! (.compose app) (ComposeWorkflow))
     (let [issue (al-elem [harness/Issue] (field world issues) at)
           wi (issue-workflow-index world issue)]
       (if (< wi 0)
@@ -385,7 +397,7 @@
         (push-wrapped! app
                        (Agent)
                        "An issue is filed in a project, and none are declared. Add one to ~/.coil-agent-harness/projects.json and it will appear in the rail."
-                       52)
+                       (wrap-width app))
         0)
       (do
         (set! (.title app)
@@ -403,7 +415,7 @@
     (if (= (slice-len [u8] text) 0)
         0
         (do
-          (push-wrapped! app (You) text 52)
+          (push-wrapped! app (You) text (wrap-width app))
           (input-clear! app)
           (match (.compose app)
             (ComposeIssue [] (backlog-send! app world text))
@@ -424,7 +436,7 @@
                                    (push-wrapped! app
                                                   (Agent)
                                                   "Nothing here is listening. ⌘N writes a new workflow; ⌘I files an issue in this project."
-                                                  52)
+                                                  (wrap-width app))
                                    0)
                                  (author-send! app world text))))))))))
 
@@ -441,12 +453,12 @@
           (push-wrapped! app
                          (Agent)
                          "That workflow is not in the library any more, so there is nothing to carry on with."
-                         52)
+                         (wrap-width app))
           0)
         (let [wf (al-elem [harness/Workflow] (field world flows) wi)
               context (harness/write-followup! a (.root world) run text)]
           (if (= (slice-len [u8] context) 0)
-              (do (push-wrapped! app (Agent) "I could not write that down." 52) 0)
+              (do (push-wrapped! app (Agent) "I could not write that down." (wrap-width app)) 0)
               (let [pid (harness/start-followup! a
                                                  (.root world)
                                                  (.folder wf)
@@ -457,7 +469,7 @@
                 (push-wrapped! app
                                (Cont)
                                "carrying on — a new run of this workflow, in the same workspace, with what you just said"
-                               52)
+                               (wrap-width app))
                 (await-run! app world (.name wf))
                 0))))))
 
@@ -482,12 +494,12 @@
           (push-wrapped! app
                          (Cont)
                          "sent — the agent picks this up at its next turn"
-                         52)
+                         (wrap-width app))
           ;; Whatever it does next is in the journal, so start watching again.
           (set! (.running app) true)
           0)
         (do
-          (push-wrapped! app (Agent) "I could not deliver that to the run." 52)
+          (push-wrapped! app (Agent) "I could not deliver that to the run." (wrap-width app))
           0))))
 
 ;; What the authoring agent is told. It writes the same shape a person would
@@ -520,7 +532,7 @@
   (let [a (.alc app)
         at (current-project app world)]
     (if (< at 0)
-        (do (push-wrapped! app (Agent) "There is no project to file anything in yet." 52) 0)
+        (do (push-wrapped! app (Agent) "There is no project to file anything in yet." (wrap-width app)) 0)
         (let [project (project-at world at)
               first (= (slice-len [u8] (.agent-conversation app)) 0)
               prompt
@@ -542,7 +554,7 @@
           (set! (.agent-stage app) 1)
           (set! (.agent-since app) (.now app))
           (set! (.running app) true)
-          (push-wrapped! app (Agent) "Thinking about that…" 52)
+          (push-wrapped! app (Agent) "Thinking about that…" (wrap-width app))
           0))))
 
 (defn issue-files [(app (ptr App)) (world (ptr World))] (-> (ArrayList (slice u8)))
@@ -580,7 +592,7 @@
     (set! (.agent-stage app) 1)
     (set! (.agent-since app) (.now app))
     (set! (.running app) true)
-    (push-wrapped! app (Agent) "Thinking about that…" 52)
+    (push-wrapped! app (Agent) "Thinking about that…" (wrap-width app))
     0))
 
 (defn flow-folders [(app (ptr App)) (world (ptr World))] (-> (ArrayList (slice u8)))
@@ -630,7 +642,7 @@
     (match (service/ask a (field world svc) "POST" "/v1/runs" (sb-finish! (mut body)))
       (None []
             (do
-              (push-wrapped! app (Agent) "The service did not answer." 52)
+              (push-wrapped! app (Agent) "The service did not answer." (wrap-width app))
               (set! (.agent-stage app) 0)
               (set! (.running app) false)
               0))
@@ -638,8 +650,8 @@
             (let [r response]
               (if (or (< (.status r) 200) (>= (.status r) 300))
                   (do
-                    (push-wrapped! app (Agent) "The service refused that:" 52)
-                    (push-wrapped! app (Agent) (own-str a (.body r)) 52)
+                    (push-wrapped! app (Agent) "The service refused that:" (wrap-width app))
+                    (push-wrapped! app (Agent) (own-str a (.body r)) (wrap-width app))
                     (set! (.agent-stage app) 0)
                     (set! (.running app) false)
                     0)
@@ -725,7 +737,7 @@
                                                           (harness/unescape a
                                                                             (json/string-text d
                                                                                               (json/token d payload))))
-                                                 52)
+                                                 (wrap-width app))
                                   0)
                                 (set! done true)
                                 0)
@@ -742,7 +754,7 @@
                             :else 0)
                       (set! i (+ (load i) 1)))))
           (when (load speaking)
-            (push-wrapped! app (Agent) (own-str a (sb-str (load speech))) 52)
+            (push-wrapped! app (Agent) (own-str a (sb-str (load speech))) (wrap-width app))
             0)
           (when (>= cursor 0)
             (match (str-parse-int (json/number-text d (json/token d cursor)))
@@ -782,7 +794,7 @@
           (push-wrapped! app
                          (Cont)
                          "nothing written yet — keep talking, and it will write the issues when there is something worth recording"
-                         52)
+                         (wrap-width app))
           0)
         (do
           (push-wrapped! app
@@ -793,7 +805,7 @@
                            (sb-push-str! (mut said) (if (= (load written) 1) " issue" " issues"))
                            (sb-push-str! (mut said) " — they are in the rail, ready to run")
                            (sb-finish! (mut said)))
-                         52)
+                         (wrap-width app))
           0))))
 
 (defn workflow-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
@@ -826,7 +838,7 @@
                 (push-wrapped! app
                                (Agent)
                                "Nothing was written. Say more, or try a different provider with COIL_GUI_PROVIDER."
-                               52)
+                               (wrap-width app))
                 0))))))
 
 (defn folder-known? [(world (ptr World)) (folder (slice u8))] (-> bool)
@@ -936,8 +948,8 @@
         (do
           (set! (.pending app) "")
           (set! (.running app) false)
-          (push-wrapped! app (Agent) "The harness would not start it:" 52)
-          (push-wrapped! app (Agent) (harness/trim-spaces text) 52)
+          (push-wrapped! app (Agent) "The harness would not start it:" (wrap-width app))
+          (push-wrapped! app (Agent) (harness/trim-spaces text) (wrap-width app))
           true))))
 
 ;; Has the run we started appeared? Opening it is what switches this window from
@@ -984,12 +996,12 @@
   (let [a (.alc app)
         run (al-elem [harness/Run] (field world runs) (view-run app))]
     (if (not (dir/terminate! (.run-pid app)))
-        (do (push-wrapped! app (Agent) "I could not stop it." 52) 0)
+        (do (push-wrapped! app (Agent) "I could not stop it." (wrap-width app)) 0)
         (do
           (harness/mark-stopped! a run)
           (set! (.run-pid app) -1)
           (set! (.running app) false)
-          (push-wrapped! app (Cont) "stopped — the agent was killed where it stood" 52)
+          (push-wrapped! app (Cont) "stopped — the agent was killed where it stood" (wrap-width app))
           (world-refresh! world a)
           (let [row (.selected app)]
             (rail-build! app world)
@@ -1080,6 +1092,10 @@
               (py f64)
               (w f64)
               (h f64)] (-> i64)
+  ;; Focus follows the most recent pointer target. The composer is the only
+  ;; target that keeps the persistent active marker; all other clicks turn it
+  ;; off before their own handling below.
+  (set! (.composer-lit app) 0.0)
   (let [geom (alloc/stack Panes)]
     (set! geom (panes w h))
     ;; Anywhere but the conversation, a click is a command and any selection it
@@ -1090,7 +1106,7 @@
           ;; there is nothing to select -- it is you saying "I am typing now",
           ;; and the strip lights up to agree.
           (and (> px (.convo-x geom)) (> py (- h (composer-height cv app (.convo geom)))))
-            (do (sel-clear! app) (set! (.composer-lit app) (.now app)) 0)
+            (do (sel-clear! app) (set! (.composer-lit app) 1.0) 0)
           (and (> px (.convo-x geom)) (> py HEADER))
             (select-begin! app px py)
           (< py HEADER)
@@ -1175,9 +1191,10 @@
                   (bytes (slice u8))
                   (command bool)
                   (shift bool)] (-> i64)
-  ;; Typing lights the composer too: the first keystroke is the other way people
-  ;; find out where their words are going.
-  (when (and (not command) (>= first 32)) (set! (.composer-lit app) (.now app)) 0)
+  ;; Keyboard input confirms the composer as the active target too. Keep this
+  ;; as a state marker rather than a timestamp: the clock may still be zero in
+  ;; a freshly started/headless interaction.
+  (when (not command) (set! (.composer-lit app) 1.0) 0)
   (if command
       (cond (= first 113) (do (os/_exit 0) 0)
             (= first 110) (new-workflow! app)
@@ -1406,6 +1423,11 @@
                                  (= (% (load frame) 30) 29))
                         (poll! app world a)
                         0)
+                      ;; A resize changes what a line can hold; twice a second is
+                      ;; often enough to notice and rebuild.
+                      (when (= (% (load frame) 30) 15)
+                        (rewrap-if-needed! app world)
+                        0)
                       (draw-app! cv app w h)
                       (blit! (load ctx) layer)
                       0)
@@ -1421,7 +1443,7 @@
         (push-wrapped! app
                        (Agent)
                        "No projects are declared. Add one to ~/.coil-agent-harness/projects.json — a name and the path to a checkout — and it will appear here."
-                       52)
+                       (wrap-width app))
         0)
       (do
         (open-project! app world 0)
@@ -1436,6 +1458,23 @@
 
 ;; What changed on disk while a run is live: the run we are waiting for may have
 ;; appeared, and the run we are watching may have grown.
+;; The conversation was wrapped for a pane of a certain width. If the window has
+;; been resized since, rebuild it at the new measure rather than leaving lines
+;; that no longer fit.
+(defn rewrap-if-needed! [(app (ptr App)) (world (ptr World))] (-> i64)
+  (if (or (= (.wrap-cols app) (.lines-cols app)) (= (.wrap-cols app) 0))
+      0
+      (let [run (view-run app)
+            issue (view-issue app)
+            flow (view-workflow app)
+            project (view-project app)]
+        (set! (.lines-cols app) (.wrap-cols app))
+        (cond (>= run 0) (open-run! app world run)
+              (>= issue 0) (open-issue! app world issue)
+              (>= flow 0) (open-workflow! app world flow)
+              (>= project 0) (open-project! app world project)
+              :else 0))))
+
 (defn poll! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
   ;; An authoring conversation and a run are never both in flight: ⌘N is its own
   ;; screen, and Run is not reachable from it.
@@ -1530,8 +1569,10 @@
     (if (= (canvas-init cv ctx h 2.0) 1)
         (do (println "fonts failed to load") 1)
         (do
-          ;; Draw once to publish the scroll limit, scroll, then draw for real:
-          ;; the limit is a property of the laid-out content.
+          ;; Draw once to publish the pane's measure and the scroll limit, rewrap
+          ;; to that measure, scroll, then draw for real.
+          (draw-app! cv app w h)
+          (rewrap-if-needed! app world)
           (draw-app! cv app w h)
           (when (> back 0.0) (scroll-by! app back) 0)
           (draw-app! cv app w h)
@@ -2268,6 +2309,38 @@
                          (state-word (.state now)))
                 0))))))
 
+;; What the window looks like the instant after you press return on ⌘I: the bug
+;; was that this drew the empty prompt screen, so the message you had just sent
+;; was nowhere on it.
+(defn compose-shot-probe [] (-> i64)
+  (let [a (malloc-allocator)
+        app (alloc/stack App)
+        cv (alloc/stack Canvas)
+        space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
+        world (alloc/stack World)]
+    (app-init! app a)
+    (world-load! world a)
+    (rail-build! app world)
+    (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
+    (start-here! app world)
+    (project-label-sync! app world)
+    (set! (.now app) 100.0)
+    (new-issue! app world)
+    ;; Before: an empty composer is the one-prompt screen.
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (write-png ctx c"compose-empty.png")
+    (set-input! app "the window forgets its size between launches")
+    (send! app world)
+    (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
+    (write-png ctx c"compose-sent.png")
+    (println "lines after sending: {d} · stage {d}"
+             (al-len [Line] (.lines app))
+             (.agent-stage app))
+    (if (> (al-len [Line] (.lines app)) 0)
+        (do (println "ok   what you sent is on screen") 0)
+        (do (println "FAIL nothing to show") 1))))
+
 ;; A conversation with the backlog, headless: say something, let the agent work,
 ;; and print what it wrote.
 (defn backlog-probe [(text (slice u8))] (-> i64)
@@ -2392,6 +2465,7 @@
           (= flag "--keys") (keys-probe)
           (= flag "--mouse") (mouse-probe)
           (= flag "--composer") (composer-probe)
+          (= flag "--compose-shot") (compose-shot-probe)
           (= flag "--backlog")
             (backlog-probe (if (> (cast i64 argc) 2)
                                (cstr->str (load (index argv 2)))

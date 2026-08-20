@@ -578,13 +578,13 @@
                   (set! (.changed s) 0.0)
                   (set! k (+ (load k) 1))))))
     (when (> (slice-len [u8] (.goal wf)) 0)
-      (push-wrapped! app (Cont) (.goal wf) 52)
+      (push-wrapped! app (Cont) (.goal wf) (wrap-width app))
       0)
     (when (> (slice-len [u8] (.input wf)) 0)
       (push-wrapped! app
                      (Cont)
                      "This workflow works on an issue, so it is not started on its own. Pick one to run it with, or press ⌘I to write a new one."
-                     52)
+                     (wrap-width app))
       0)
     (relayout! app)
     0))
@@ -626,7 +626,7 @@
                                         (= event "tool.call.proposed")
                                           (do
                                             (when (load speaking)
-                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) (wrap-width app))
                                               (set! speech (sb-new a))
                                               (set! speaking false)
                                               0)
@@ -656,7 +656,7 @@
                                         (= event "operator.message.delivered")
                                           (do
                                             (when (load speaking)
-                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+                                              (push-wrapped! app (Agent) (sb-finish! (mut speech)) (wrap-width app))
                                               (set! speech (sb-new a))
                                               (set! speaking false)
                                               0)
@@ -664,7 +664,7 @@
                                               (push-wrapped! app
                                                              (You)
                                                              (unescape a (doc-string d payload "text"))
-                                                             52)
+                                                             (wrap-width app))
                                               0)
                                             0)
                                         :else 0)
@@ -674,7 +674,7 @@
                         0)
                       (set! at (+ stop 1)))))
           (when (load speaking)
-            (push-wrapped! app (Agent) (sb-finish! (mut speech)) 52)
+            (push-wrapped! app (Agent) (sb-finish! (mut speech)) (wrap-width app))
             0)
           0))))
 
@@ -1125,6 +1125,59 @@
 ;; Show an issue: the workflow that would carry it out fills the middle pane with
 ;; its steps, all queued, and the issue itself is what you read on the right.
 ;; Nothing has run, so nothing claims to have.
+;; Markdown, shown as itself.
+;;
+;; Paragraphs are reflowed rather than replayed line by line: what somebody wrote
+;; is already wrapped at their measure, and wrapping that again at this one gives
+;; a long line, a short line, a long line -- text that looks broken. Blank lines,
+;; headings and list items keep their own line, because those are structure.
+(defn issue-line-breaks? [(row (slice u8))] (-> bool)
+  (or (starts-with row "#")
+      (or (starts-with row "- ")
+          (or (starts-with row "* ")
+              (or (starts-with row "```") (starts-with row "1. "))))))
+
+(defn issue-heading-text [(row (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] row)
+        (mut cut) 0]
+    (loop (if (or (>= (load cut) n)
+                  (not (= (primitive/cast i64 (slice-get [u8] row (load cut))) 35)))
+              (break)
+              (set! cut (+ (load cut) 1))))
+    (trim-spaces (substr row (load cut) n))))
+
+(defn push-issue-body! [(app (ptr App)) (body (slice u8))] (-> i64)
+  (let [a (.alc app)
+        n (slice-len [u8] body)
+        (mut at) 0
+        (mut para) (sb-new a)
+        (mut open) false]
+    (loop (if (>= (load at) n)
+              (break)
+              (let [stop (line-at body (load at))
+                    row (trim-spaces (substr body (load at) (if (> stop n) n stop)))]
+                (if (or (= (slice-len [u8] row) 0) (issue-line-breaks? row))
+                    (do
+                      ;; Whatever paragraph was building ends here.
+                      (when (load open)
+                        (push-wrapped! app (Cont) (sb-finish! (mut para)) (wrap-width app))
+                        (set! para (sb-new a))
+                        (set! open false)
+                        0)
+                      (cond (= (slice-len [u8] row) 0) (push-line! app (mk-line (Cont) "" ""))
+                            (starts-with row "#")
+                              (push-wrapped! app (Agent) (issue-heading-text row) (wrap-width app))
+                            :else (push-wrapped! app (Cont) row (wrap-width app)))
+                      0)
+                    (do
+                      (when (load open) (sb-push-byte! (mut para) (primitive/cast u8 32)) 0)
+                      (sb-push-str! (mut para) row)
+                      (set! open true)
+                      0))
+                (set! at (+ stop 1)))))
+    (when (load open) (push-wrapped! app (Cont) (sb-finish! (mut para)) (wrap-width app)) 0)
+    0))
+
 (defn load-issue! [(app (ptr App))
                    (issue (ptr Issue))
                    ;; "" when the project declares a workflow that is not on
@@ -1162,8 +1215,11 @@
                       (set! k (+ (load k) 1))))))
         0))
     ;; The title is already the header of the pane; repeating it as the first
-    ;; line of the issue would be the same words twice.
-    (push-wrapped! app (You) (body-after-heading (.body issue)) 52)
+    ;; line of the issue would be the same words twice. What is left is shown the
+    ;; way it was written: one paragraph per paragraph, headings on their own
+    ;; line, blank lines kept. Wrapping the whole thing as one run of text turns
+    ;; a structured issue into a wall nobody reads.
+    (push-issue-body! app (body-after-heading (.body issue)))
     (if have-workflow
         (push-wrapped! app
                        (Agent)
@@ -1175,11 +1231,11 @@
                          (sb-push-str! (mut said) workflow)
                          (sb-push-str! (mut said) ", which starts a real run against the project.")
                          (sb-finish! (mut said)))
-                       52)
+                       (wrap-width app))
         (push-wrapped! app
                        (Agent)
                        "No workflow is declared for this project, so there is nothing to run it with yet."
-                       52))
+                       (wrap-width app)))
     (relayout! app)
     0))
 

@@ -89,13 +89,16 @@
                         (fill! cv 0.0 (load y) RAIL_W ROW (amber-wash))
                         (fill! cv 0.0 (load y) 2.0 ROW (amber))
                         0)
+                      ;; A project heading is the brightest thing in the rail and
+                      ;; everything under it is indented, so which project a row
+                      ;; belongs to is legible without reading upward.
                       (text-elided! cv
                                     (field cv m12)
                                     GUTTER_RAIL
                                     (load y)
                                     ROW
-                                    170.0
-                                    (if selected (ink1) (ink2))
+                                    (- RAIL_W (* 2.0 GUTTER_RAIL))
+                                    (if selected (ink1) (ink1))
                                     (.project it))
                       (set! y (+ (load y) ROW))
                       0)
@@ -104,7 +107,7 @@
                     (do
                       (text-elided! cv
                                     (field cv f11)
-                                    (+ GUTTER_RAIL 20.0)
+                                    (+ RAIL_INDENT 20.0)
                                     (load y)
                                     ROW
                                     170.0
@@ -151,25 +154,27 @@
                       ;; of nothing at all.
                       (cond (item-issue? it)
                               (do
-                                (box! cv (+ GUTTER_RAIL 1.5) (+ top (- (/ ROW 2.0) 3.5)) 7.0 7.0 (ink3))
+                                (box! cv (+ RAIL_INDENT 1.5) (+ top (- (/ ROW 2.0) 3.5)) 7.0 7.0 (ink3))
                                 0)
                             (item-workflow? it)
                               (do
                                 (text-at! cv
                                           (field cv m12)
-                                          (+ GUTTER_RAIL 1.0)
+                                          (+ RAIL_INDENT 1.0)
                                           (+ top (+ (/ ROW 2.0) 4.0))
                                           (ink3)
                                           "›")
                                 0)
                             :else
-                              (state-mark! cv st (+ GUTTER_RAIL 5.0) (+ top (/ ROW 2.0)) (.now app)))
+                              (state-mark! cv st (+ RAIL_INDENT 5.0) (+ top (/ ROW 2.0)) (.now app)))
                       (text-elided! cv
                                     (field cv f12)
-                                    (+ GUTTER_RAIL 20.0)
+                                    (+ RAIL_INDENT 20.0)
                                     top
                                     ROW
-                                    150.0
+                                    ;; Everything the rail can spare: the mark,
+                                    ;; the indent, and the count on the right.
+                                    (- (- RAIL_W (+ RAIL_INDENT 20.0)) 64.0)
                                     (if selected (ink1) (if (= (state-word st) "done") (ink3) (ink2)))
                                     name)
                       (when (> (slice-len [u8] meta) 0)
@@ -378,7 +383,7 @@
 ;; question: a project asks which workflow, and a workflow that needs an issue
 ;; asks which issue.
 (defn picker-wants-issues? [(app (ptr App))] (-> bool)
-  (>= (view-workflow app) 0))
+  (or (>= (view-workflow app) 0) (issue-composer? app)))
 
 (defn picker-row? [(app (ptr App)) (it (ptr Item))] (-> bool)
   (if (picker-wants-issues? app) (item-issue? it) (item-workflow? it)))
@@ -393,9 +398,9 @@
                    (+ x GUTTER_PANE)
                    (row-baseline (field cv f11) (+ HEADER 14.0) 22.0)
                    (ink3)
-                   (if (picker-wants-issues? app)
-                       "run it on one of these"
-                       "run a workflow here")
+                   (cond (issue-composer? app) "the backlog"
+                         (picker-wants-issues? app) "run it on one of these"
+                         :else "run a workflow here")
                    1.4)
     (loop (if (>= (load i) n)
               (break)
@@ -645,17 +650,21 @@
         text (al-slice [u8] (.input app))
         base (+ x GUTTER_PANE)
         empty (= (slice-len [u8] text) 0)
-        ;; A click here, or a keystroke, lights the strip and fades. Typing has
-        ;; always gone to this line whether or not you clicked it; what was
-        ;; missing was the line saying so.
-        lit (ease-out (phase (.now app) (.composer-lit app) 0.45))
-        recent (< lit 1.0)]
-    (when recent (fill! cv x top w height (mix (amber-wash) (ground) lit)) 0)
+        ;; A click here, or a keystroke, makes the composer the active target.
+        ;; Typing has always gone to this line whether or not you clicked it;
+        ;; keep the confirmation visible instead of letting it disappear after
+        ;; the short feedback animation. `composer-lit` is a persistent marker;
+        ;; the zero blend amount keeps the active wash fully amber.
+        active (> (.composer-lit app) 0.0)
+        lit 0.0]
+    ;; Keep this separate from the old transient feedback timing: once the
+    ;; composer has been activated, its visual confirmation must not fade out.
+    (when active (fill! cv x top w height (mix (amber-wash) (ground) lit)) 0)
     ;; The rule above the composer brightens with it, so the whole strip reads as
     ;; one thing rather than a line with a cursor loose beneath it. Two pixels
     ;; while it is lit: a hairline that changes colour is not a change anyone
     ;; sees at the bottom of a window they are not looking at yet.
-    (if recent
+    (if active
         (fill! cv x top w 2.0 (mix (amber) (line) lit))
         (hline! cv x top w (line)))
     (caret! cv (+ base 4.0) (+ top 26.0) (amber))
@@ -718,6 +727,10 @@
 ;; is hundreds of lines and the part worth reading is the end of it. When it
 ;; fits, it sits at the top as normal.
 (defn draw-convo! [(cv (ptr Canvas)) (app (ptr App)) (p (ptr Panes)) (x f64) (w f64) (h f64)] (-> i64)
+  ;; What a line can hold here, measured, so whatever builds lines wraps them to
+  ;; the width they will actually be drawn at.
+  (set! (.wrap-cols app)
+        (cast i64 (/ (- (- w GUTTER_PANE) 60.0) (.adv (field cv f13)))))
   (let [n (al-len [Line] (.lines app))
         top (+ HEADER 22.0)
         bottom (- h (+ (composer-height cv app w) 14.0))
@@ -967,16 +980,18 @@
 ;; ---------------------------------------------------------------- whole window
 
 (defn draw-app! [(cv (ptr Canvas)) (app (ptr App)) (w f64) (h f64)] (-> i64)
-  ;; The one-prompt screen belongs to writing something new. Everything else --
-  ;; a project with nothing in it included -- is the three panes, because the
-  ;; rail is how you get anywhere and it must never disappear.
-  (let [split (not (view-nothing? app))
+  ;; The one-prompt screen belongs to a composer with nothing in it yet. The
+  ;; moment there is a conversation -- what you said, what the agent is doing --
+  ;; it has to be on screen, or sending reads as the text box clearing and
+  ;; nothing happening.
+  (let [split (or (not (view-nothing? app)) (> (al-len [Line] (.lines app)) 0))
         geom (alloc/stack Panes)]
     (set! geom (panes w h))
     (fill! cv 0.0 0.0 w h (ground))
     (if split
         (do
-          (if (or (>= (view-project app) 0) (needs-input? app))
+          (if (or (>= (view-project app) 0)
+                  (or (needs-input? app) (issue-composer? app)))
               (draw-picker! cv app (.rail geom) (.graph geom) h)
               (draw-graph! cv app geom (.rail geom) (.graph geom) h))
           (draw-convo! cv app geom (.convo-x geom) (.convo geom) h)

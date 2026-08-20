@@ -41,9 +41,16 @@
 
 (const HEADER 46.0)
 (const ROW 30.0)
+;; Rows sit in from their project heading, which is what makes the grouping
+;; readable when two projects have similar names.
+(const RAIL_INDENT 28.0)
 (const NODE_W 118.0)
 (const NODE_H 30.0)
-(const RAIL_W 260.0)
+
+;; Wide enough for a real title. Agent-written issues start with the same few
+;; words -- "Composer text does not..." three times over -- so a rail that cuts
+;; at twenty characters shows you three identical rows.
+(const RAIL_W 330.0)
 (const GRAPH_W 620.0)
 (const GUTTER_RAIL 18.0)
 (const GUTTER_PANE 22.0)
