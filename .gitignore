@@ -2,3 +2,8 @@
 builds/
 *.o
 *.png
+# What a run leaves behind when this checkout is the workspace: its private copy
+# of the workflow, and the tool output it captured. Local, not source.
+.factory/
+.factory-artifacts/
+.factory-inbox/
