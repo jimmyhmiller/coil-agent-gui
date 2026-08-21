@@ -16,9 +16,9 @@
 (const CELL 64)
 
 (defn ring-buf [] (-> (ptr (array u8 1024)))
-  (alloc/static (array u8 1024)))
+  (primitive/alloc-static (array u8 1024)))
 (defn ring-at [] (-> (ptr i64))
-  (alloc/static i64))
+  (primitive/alloc-static i64))
 
 (defn next-cell [] (-> (ptr u8))
   (let [slot (load (ring-at))
@@ -39,7 +39,7 @@
 ;; Decimal, no allocation. Negative values are not expected here and render "0".
 (defn dec-str [(v i64)] (-> (slice u8))
   (let [cell (next-cell)
-        digits (alloc/stack (array u8 24))
+        digits (primitive/alloc-stack (array u8 24))
         (mut n) (if (< v 0) 0 v)
         (mut count) 0]
     (if (= (load n) 0)

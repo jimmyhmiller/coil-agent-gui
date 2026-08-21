@@ -84,7 +84,7 @@
    ;; wrote can be told apart from what was already there.
    (before (ArrayList (slice u8)))])
 
-(defn world-load! [(world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn world-load! [(world (ptr World)) (a (dyn Allocator))] (-> i64)
   (set! (.root world) (harness-root a))
   (set! (.projects world) (harness/discover-projects a))
   (set! (.flows world) (harness/discover a (.root world)))
@@ -97,12 +97,12 @@
 
 ;; Runs and issues change while the window is open; the library and the project
 ;; list do not, so a reload after starting something re-reads only what moved.
-(defn world-refresh! [(world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn world-refresh! [(world (ptr World)) (a (dyn Allocator))] (-> i64)
   (set! (.runs world) (harness/discover-runs a (.root world) (field world projects)))
   (set! (.issues world) (harness/discover-issues a (.root world)))
   0)
 
-(defn harness-root [(a (ptr Allocator))] (-> (slice u8))
+(defn harness-root [(a (dyn Allocator))] (-> (slice u8))
   (match (os/env-get a "COIL_HARNESS_ROOT")
     (Ok [found]
         (match found
@@ -518,7 +518,7 @@
 (defn gui-ms [] (-> i64)
   (cast i64 (* 1000.0 (CACurrentMediaTime))))
 
-(defn agent-id! [(app (ptr App)) (a (ptr Allocator)) (prefix (slice u8))] (-> (slice u8))
+(defn agent-id! [(app (ptr App)) (a (dyn Allocator)) (prefix (slice u8))] (-> (slice u8))
   (set! (.agent-seq app) (+ (.agent-seq app) 1))
   (own-str a (join3 prefix (dec-str (gui-ms)) (join2 "-" (dec-str (.agent-seq app))))))
 
@@ -611,7 +611,7 @@
 
 ;; The service is a child process, started once and reused. Nothing is exposed:
 ;; loopback, and a token this process invents.
-(defn agent-service-ready? [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> bool)
+(defn agent-service-ready? [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> bool)
   (if (service/probe a (field world svc))
       true
       (do
@@ -623,7 +623,7 @@
           0)
         false)))
 
-(defn agent-post! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn agent-post! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (let [run (agent-id! app a "gui-run-")
         (mut body) (sb-new a)]
     (sb-push-str! (mut body) "{\"version\":1,\"command_id\":\"")
@@ -665,18 +665,18 @@
 ;; one that is reachable without a key; COIL_GUI_PROVIDER and COIL_GUI_MODEL
 ;; name any other provider the harness knows, including one declared in
 ;; providers.json.
-(defn author-provider [(a (ptr Allocator))] (-> (slice u8))
+(defn author-provider [(a (dyn Allocator))] (-> (slice u8))
   (let [named (harness/env-or a "COIL_GUI_PROVIDER" "")]
     (if (> (slice-len [u8] named) 0) named "claude")))
 
-(defn author-model [(a (ptr Allocator))] (-> (slice u8))
+(defn author-model [(a (dyn Allocator))] (-> (slice u8))
   (let [named (harness/env-or a "COIL_GUI_MODEL" "")]
     (if (> (slice-len [u8] named) 0) named "claude-sonnet-4-6")))
 
 ;; Everything the agent has said or done since the last poll, in the same shapes
 ;; a replayed run uses — the pane cannot tell a live agent from a recorded one,
 ;; which is the point.
-(defn agent-poll! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn agent-poll! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (let [(mut path) (sb-new a)]
     (sb-push-str! (mut path) "/v1/runs/")
     (sb-push-str! (mut path) (.agent-run app))
@@ -690,7 +690,7 @@
                   0
                   (agent-absorb! app world a (.body r))))))))
 
-(defn agent-absorb! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator)) (body (slice u8))] (-> i64)
+(defn agent-absorb! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator)) (body (slice u8))] (-> i64)
   (match (json/parse a body)
     (Err [e] 0)
     (Ok [d]
@@ -766,14 +766,14 @@
 
 ;; The agent said it was done. Whatever it wrote is on disk, so the library is
 ;; re-read and the folder that was not there before becomes the open workflow.
-(defn author-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn author-finished! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (set! (.agent-stage app) 0)
   (set! (.running app) false)
   (if (issue-composer? app) (backlog-finished! app world a) (workflow-finished! app world a)))
 
 ;; Whatever it wrote is on disk. The backlog is re-read, and anything that was
 ;; not there before is what this conversation produced.
-(defn backlog-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn backlog-finished! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (set! (.issues world) (harness/discover-issues a (.root world)))
   (rail-build! app world)
   (let [n (al-len [harness/Issue] (.issues world))
@@ -808,7 +808,7 @@
                          (wrap-width app))
           0))))
 
-(defn workflow-finished! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn workflow-finished! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (set! (.flows world) (harness/discover a (.root world)))
   (rail-build! app world)
   (let [n (al-len [harness/Workflow] (.flows world))
@@ -941,7 +941,7 @@
 
 ;; A command that is not going to run says so on its own stderr within a moment.
 ;; Showing that is the difference between "nothing happened" and a reason.
-(defn report-refusal! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> bool)
+(defn report-refusal! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> bool)
   (let [text (harness/read-log a (.root world))]
     (if (not (harness/log-is-refusal? text))
         false
@@ -1035,7 +1035,7 @@
 
 ;; The selected text, with a newline between lines. A wrapped paragraph is many
 ;; lines here, so this is what was on screen rather than what was in the journal.
-(defn selection-text [(app (ptr App)) (a (ptr Allocator))] (-> (slice u8))
+(defn selection-text [(app (ptr App)) (a (dyn Allocator))] (-> (slice u8))
   (if (not (sel-active? app))
       ""
       (let [first (sel-first-line app)
@@ -1061,7 +1061,7 @@
         (sb-finish! (mut out)))))
 
 ;; Onto the system pasteboard, so ⌘V works in any other application.
-(defn copy-selection! [(app (ptr App)) (a (ptr Allocator))] (-> i64)
+(defn copy-selection! [(app (ptr App)) (a (dyn Allocator))] (-> i64)
   (let [text (selection-text app a)]
     (if (= (slice-len [u8] text) 0)
         0
@@ -1096,7 +1096,7 @@
   ;; target that keeps the persistent active marker; all other clicks turn it
   ;; off before their own handling below.
   (set! (.composer-lit app) 0.0)
-  (let [geom (alloc/stack Panes)]
+  (let [geom (primitive/alloc-stack Panes)]
     (set! geom (panes w h))
     ;; Anywhere but the conversation, a click is a command and any selection it
     ;; leaves behind would only be stale.
@@ -1157,7 +1157,7 @@
           :else 0)))
 
 (defn hover! [(app (ptr App)) (cv (ptr Canvas)) (px f64) (py f64) (w f64) (h f64)] (-> i64)
-  (let [geom (alloc/stack Panes)]
+  (let [geom (primitive/alloc-stack Panes)]
     (set! geom (panes w h))
     (let [in-rail (< px (.rail geom))
           in-graph (and (>= px (.rail geom)) (< px (.convo-x geom)))
@@ -1253,7 +1253,7 @@
 ;; ---------------------------------------------------------------- window
 
 (defn make-window [(w f64) (h f64)] (-> (ptr i8))
-  (let [r (alloc/stack CGRect)
+  (let [r (primitive/alloc-stack CGRect)
         alloc-win (msg (ptr i8) (objc-class c"NSWindow") (objc-sel c"alloc") [])]
     (set! (.x r) 120.0)
     (set! (.y r) 120.0)
@@ -1317,7 +1317,7 @@
                         ;; A trackpad reports points; a wheel reports lines. One
                         ;; line is about three of these rows.
                         dy (if precise raw (* raw (* LINE_H 3.0)))
-                        geom (alloc/stack Panes)]
+                        geom (primitive/alloc-stack Panes)]
                     (store! geom (panes w h))
                     (when (> (.x pt) (.convo-x geom))
                       (scroll-by! app dy)
@@ -1340,8 +1340,8 @@
 
 (defn run-window [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         nsapp (msg (ptr i8) (objc-class c"NSApplication") (objc-sel c"sharedApplication") [])
         win (make-window (cast f64 WIDTH) (cast f64 HEIGHT))
@@ -1352,7 +1352,7 @@
                [(ptr i8)]
                c"kCFRunLoopDefaultMode")
         title (msg (ptr i8) (objc-class c"NSString") (objc-sel c"stringWithUTF8String:") [(ptr i8)] c"coil")
-        world (alloc/stack World)
+        world (primitive/alloc-stack World)
         ;; The live drawing surface. It is rebuilt whenever the window changes
         ;; size, which is the only reason any of this is mutable.
         (mut ctx) (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
@@ -1475,7 +1475,7 @@
               (>= project 0) (open-project! app world project)
               :else 0))))
 
-(defn poll! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn poll! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   ;; An authoring conversation and a run are never both in flight: ⌘N is its own
   ;; screen, and Run is not reachable from it.
   (if (> (.agent-stage app) 0)
@@ -1487,7 +1487,7 @@
             :else 0)
       (poll-run! app world a)))
 
-(defn poll-run! [(app (ptr App)) (world (ptr World)) (a (ptr Allocator))] (-> i64)
+(defn poll-run! [(app (ptr App)) (world (ptr World)) (a (dyn Allocator))] (-> i64)
   (if (> (slice-len [u8] (.pending app)) 0)
       (do
         (world-refresh! world a)
@@ -1540,11 +1540,11 @@
 ;; or a project. Every scene this app can be reviewed in comes off disk.
 (defn render-shot [(what (slice u8)) (which i64) (w f64) (h f64) (back f64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (cast i64 (* w 2.0)) (cast i64 (* h 2.0)) 8 0 space 1)
-        world (alloc/stack World)]
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1589,8 +1589,8 @@
 ;; of them. This is the whole app except for the pixels.
 (defn rail-probe [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1647,11 +1647,11 @@
 ;; separated from event delivery when a click "does nothing".
 (defn click-probe [(px f64) (py f64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)]
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1688,8 +1688,8 @@
 ;; and print the command it would run in the current project.
 (defn run-probe [(which i64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1711,8 +1711,8 @@
 ;; window runs, until the agent has finished and the library has changed.
 (defn author-probe [(text (slice u8))] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1767,8 +1767,8 @@
 ;; the whole running path with no window and no keystroke.
 (defn run-now-probe [(which i64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1827,11 +1827,11 @@
 ;; were put before anything can ask what is under a point.
 (defn select-probe [(x1 f64) (y1 f64) (x2 f64) (y2 f64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)]
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1871,8 +1871,8 @@
 ;; it to be going, say something into it, and watch what it does next.
 (defn say-probe [(which i64) (text (slice u8))] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1929,8 +1929,8 @@
 ;; Starts a workflow and then stops it, the way the header button does.
 (defn stop-probe [(which i64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -1970,10 +1970,10 @@
                 ;; Click it, rather than calling what it calls: the button's
                 ;; position and the hit test have to agree, and that is exactly
                 ;; the kind of thing that drifts.
-                (let [cv (alloc/stack Canvas)
+                (let [cv (primitive/alloc-stack Canvas)
                       space (CGColorSpaceCreateDeviceRGB)
                       ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-                      geom (alloc/stack Panes)]
+                      geom (primitive/alloc-stack Panes)]
                   (canvas-init cv ctx (primitive/cast f64 HEIGHT) 2.0)
                   (set! geom (panes (cast f64 WIDTH) (cast f64 HEIGHT)))
                   (draw-app! cv app (cast f64 WIDTH) (cast f64 HEIGHT))
@@ -2012,7 +2012,7 @@
                 (set! i (+ (load i) 1)))))
     0))
 
-(defn pasteboard-text [(a (ptr Allocator))] (-> (slice u8))
+(defn pasteboard-text [(a (dyn Allocator))] (-> (slice u8))
   (let [board (msg (ptr i8) (objc-class c"NSPasteboard") (objc-sel c"generalPasteboard") [])
         kind
           (msg (ptr i8)
@@ -2028,11 +2028,11 @@
 
 (defn keys-probe [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)
+        world (primitive/alloc-stack World)
         (mut failures) 0]
     (app-init! app a)
     (world-load! world a)
@@ -2072,7 +2072,7 @@
           (println "FAIL composer holds [{s}]" (input-slice app))
           (set! failures (+ (load failures) 1))
           0))
-    (let [cv2 (alloc/stack Canvas)
+    (let [cv2 (primitive/alloc-stack Canvas)
           space2 (CGColorSpaceCreateDeviceRGB)
           ctx2 (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space2 1)]
       (canvas-init cv2 ctx2 (primitive/cast f64 HEIGHT) 2.0)
@@ -2128,11 +2128,11 @@
 ;; release. Nothing here reaches past what an event delivers.
 (defn mouse-probe [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)
+        world (primitive/alloc-stack World)
         (mut failures) 0]
     (app-init! app a)
     (world-load! world a)
@@ -2191,8 +2191,8 @@
 ;; whole issue path, with a real agent, exactly as the window drives it.
 (defn run-issue-probe [(which i64)] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -2238,11 +2238,11 @@
 ;; difference a click makes can be looked at rather than asserted.
 (defn composer-probe [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)]
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -2268,8 +2268,8 @@
 ;; and follows what it starts.
 (defn carry-probe [(which i64) (text (slice u8))] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -2314,11 +2314,11 @@
 ;; was nowhere on it.
 (defn compose-shot-probe [] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        cv (alloc/stack Canvas)
+        app (primitive/alloc-stack App)
+        cv (primitive/alloc-stack Canvas)
         space (CGColorSpaceCreateDeviceRGB)
         ctx (CGBitmapContextCreate (nil-ptr) (* WIDTH 2) (* HEIGHT 2) 8 0 space 1)
-        world (alloc/stack World)]
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -2345,8 +2345,8 @@
 ;; and print what it wrote.
 (defn backlog-probe [(text (slice u8))] (-> i64)
   (let [a (malloc-allocator)
-        app (alloc/stack App)
-        world (alloc/stack World)]
+        app (primitive/alloc-stack App)
+        world (primitive/alloc-stack World)]
     (app-init! app a)
     (world-load! world a)
     (rail-build! app world)
@@ -2395,7 +2395,7 @@
 
 (defn serve-probe [(port i64)] (-> i64)
   (let [a (malloc-allocator)
-        svc (alloc/stack service/Service)
+        svc (primitive/alloc-stack service/Service)
         root (harness-root a)]
     (service/init! svc a root port port)
     (println "root {s} · port {d} · token {s}" root port (.token svc))

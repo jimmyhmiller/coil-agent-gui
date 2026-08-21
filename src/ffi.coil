@@ -76,7 +76,7 @@
   (= (primitive/cast i64 p) 0))
 
 (defn cg-rect [(x f64) (y f64) (w f64) (h f64)] (-> CGRect)
-  (let [r (alloc/stack CGRect)]
+  (let [r (primitive/alloc-stack CGRect)]
     (set! (.x r) x)
     (set! (.y r) y)
     (set! (.w r) w)

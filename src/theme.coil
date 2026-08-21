@@ -10,7 +10,7 @@
 (defstruct Color [(r f64) (g f64) (b f64)])
 
 (defn col [(r i64) (g i64) (b i64)] (-> Color)
-  (let [c (alloc/stack Color)]
+  (let [c (primitive/alloc-stack Color)]
     (set! (.r c) (/ (primitive/cast f64 r) 255.0))
     (set! (.g c) (/ (primitive/cast f64 g) 255.0))
     (set! (.b c) (/ (primitive/cast f64 b) 255.0))
@@ -74,7 +74,7 @@
   (+ a (* (- b a) t)))
 
 (defn mix [(a Color) (b Color) (t f64)] (-> Color)
-  (let [c (alloc/stack Color)]
+  (let [c (primitive/alloc-stack Color)]
     (set! (field c r) (lerp (.r a) (.r b) t))
     (set! (field c g) (lerp (.g a) (.g b) t))
     (set! (field c b) (lerp (.b a) (.b b) t))

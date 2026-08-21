@@ -139,7 +139,7 @@
   (ViewIssue [(at i64)]))
 
 (defstruct App
-  [(alc (ptr Allocator))
+  [(alc (dyn Allocator))
    (title (slice u8))
    (items (ArrayList Item))
    (steps (ArrayList Step))
@@ -242,7 +242,7 @@
     (SAsks [] "asks")))
 
 (defn mk-step [(name (slice u8)) (from i64) (join i64) (st State) (machine (slice u8)) (secs i64)] (-> Step)
-  (let [s (alloc/stack Step)]
+  (let [s (primitive/alloc-stack Step)]
     (set! (.name s) name)
     (set! (.state s) st)
     (set! (.machine s) machine)
@@ -255,7 +255,7 @@
     (load s)))
 
 (defn mk-line [(who Speaker) (text (slice u8)) (trail (slice u8))] (-> Line)
-  (let [l (alloc/stack Line)]
+  (let [l (primitive/alloc-stack Line)]
     (set! (.who l) who)
     (set! (.text l) text)
     (set! (.trail l) trail)
@@ -270,7 +270,7 @@
                (meta (slice u8))
                (kind ItemKind)
                (source i64)] (-> Item)
-  (let [i (alloc/stack Item)]
+  (let [i (primitive/alloc-stack Item)]
     (set! (.project i) project)
     (set! (.name i) name)
     (set! (.state i) st)
@@ -501,7 +501,7 @@
                   (if (> running 0) (SRunning) (if (and (> n 0) (= done n)) (SDone) (SQueued))))))
     0))
 
-(defn app-init! [(app (ptr App)) (a (ptr Allocator))] (-> i64)
+(defn app-init! [(app (ptr App)) (a (dyn Allocator))] (-> i64)
   (set! (.alc app) a)
   (set! (.title app) "untitled")
   (set! (.input app) (al-new [u8] a))
@@ -551,18 +551,22 @@
   (lines-clear! app)
   0)
 
-(defn own-str [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+(defn own-str [(a (dyn Allocator)) (s (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] s)]
     (if (= n 0)
         ""
-        (let [p (unwrap-ptr [u8] (alloc-slice [u8] a n))
-              (mut i) 0]
-          (loop (if (>= (load i) n)
-                    (break)
-                    (do
-                      (set! (primitive/index p (load i)) (slice-get [u8] s (load i)))
-                      (set! i (+ (load i) 1)))))
-          (slice-new [u8] p n)))))
+        (match (alloc [u8] a n)
+          (None [] (do (oom-at c"coilgui.model.own-str" n) ""))
+          (Some [memory]
+                (do
+                  (let [p (slice-data memory)
+                        (mut i) 0]
+                    (loop (if (>= (load i) n)
+                              (break)
+                              (do
+                                (set! (primitive/index p (load i)) (slice-get [u8] s (load i)))
+                                (set! i (+ (load i) 1))))))
+                  memory))))))
 
 ;; Wrap on spaces at `width` characters, first line marked, the rest continuations.
 ;; Wrap at whatever the pane can actually draw. Callers pass the app's measure

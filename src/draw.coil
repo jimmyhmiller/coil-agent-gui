@@ -29,22 +29,22 @@
    (m13 Face)])
 
 (defn units [] (-> (ptr (array u16 512)))
-  (alloc/static (array u16 512)))
+  (primitive/alloc-static (array u16 512)))
 (defn glyphs [] (-> (ptr (array u16 512)))
-  (alloc/static (array u16 512)))
+  (primitive/alloc-static (array u16 512)))
 (defn spots [] (-> (ptr (array CGPoint 512)))
-  (alloc/static (array CGPoint 512)))
+  (primitive/alloc-static (array CGPoint 512)))
 
 ;; A second set of buffers for the fallback pass: the codepoints the primary
 ;; face has no glyph for, and where they go.
 (defn units-fb [] (-> (ptr (array u16 512)))
-  (alloc/static (array u16 512)))
+  (primitive/alloc-static (array u16 512)))
 
 (defn glyphs-fb [] (-> (ptr (array u16 512)))
-  (alloc/static (array u16 512)))
+  (primitive/alloc-static (array u16 512)))
 
 (defn spots-fb [] (-> (ptr (array CGPoint 512)))
-  (alloc/static (array CGPoint 512)))
+  (primitive/alloc-static (array CGPoint 512)))
 ;; UTF-8 to UTF-16, BMP only: the interface uses a fixed set of glyphs and none
 ;; of them is above U+FFFF. Anything that is becomes U+FFFD rather than a
 ;; silently malformed surrogate. Returns the unit count.
@@ -122,7 +122,7 @@
         (CTFontCreateWithFontDescriptor (CFArrayGetValueAtIndex descs 0) size (nil-ptr)))))
 
 (defn face-load [(path (ptr i8)) (size f64)] (-> Face)
-  (let [face (alloc/stack Face)
+  (let [face (primitive/alloc-stack Face)
         cf (CFStringCreateWithCString (nil-ptr) path CF_UTF8)
         url (CFURLCreateWithFileSystemPath (nil-ptr) cf 0 0)
         descs (CTFontManagerCreateFontDescriptorsFromURL url)]
@@ -146,7 +146,7 @@
 ;; `scale` is the device pixel ratio: the bitmap is that many times larger than
 ;; the layout, and everything above this line keeps working in points.
 (defn canvas-init [(cv (ptr Canvas)) (ctx (ptr i8)) (height f64) (scale f64)] (-> i64)
-  (let [flip (alloc/stack CGAffine)]
+  (let [flip (primitive/alloc-stack CGAffine)]
     (CGContextScaleCTM ctx scale scale)
     (set! (.ctx cv) ctx)
     (set! (.height cv) height)
@@ -174,7 +174,7 @@
 ;; Point the canvas at a new bitmap, without paying to re-read the fonts. The
 ;; window does this on every resize, so it happens while the mouse is moving.
 (defn canvas-resize! [(cv (ptr Canvas)) (ctx (ptr i8)) (height f64) (scale f64)] (-> i64)
-  (let [flip (alloc/stack CGAffine)]
+  (let [flip (primitive/alloc-stack CGAffine)]
     (CGContextScaleCTM ctx scale scale)
     (set! (.ctx cv) ctx)
     (set! (.height cv) height)
@@ -225,7 +225,7 @@
   (vline! cv (- (+ x w) HAIRLINE) y h c))
 
 (defn dashes [] (-> (ptr (array f64 2)))
-  (alloc/static (array f64 2)))
+  (primitive/alloc-static (array f64 2)))
 
 (defn path! [(cv (ptr Canvas)) (c Color) (dashed bool)] (-> i64)
   (let [ctx (.ctx cv)

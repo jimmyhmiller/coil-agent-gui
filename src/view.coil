@@ -5,7 +5,7 @@
 ;; filled except a selected row, and nothing is rounded.
 (module coilgui.view)
 
-(import "coil.alloc" :as alloc :use *)
+(import "coil.alloc" :as alloc :use * :exclude [box!])
 (import "coil.arraylist" :use *)
 (import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
@@ -23,7 +23,7 @@
 (defstruct Panes [(w f64) (h f64) (rail f64) (graph f64) (convo-x f64) (convo f64)])
 
 (defn panes [(w f64) (h f64)] (-> Panes)
-  (let [p (alloc/stack Panes)
+  (let [p (primitive/alloc-stack Panes)
         rail RAIL_W
         wide (- w rail)
         ;; The conversation takes a share of what is left, within bounds: narrow
@@ -985,7 +985,7 @@
   ;; it has to be on screen, or sending reads as the text box clearing and
   ;; nothing happening.
   (let [split (or (not (view-nothing? app)) (> (al-len [Line] (.lines app)) 0))
-        geom (alloc/stack Panes)]
+        geom (primitive/alloc-stack Panes)]
     (set! geom (panes w h))
     (fill! cv 0.0 0.0 w h (ground))
     (if split

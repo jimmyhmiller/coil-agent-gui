@@ -39,7 +39,7 @@
 
 (const DIRENT_NAME_MAX 1024)
 
-(defn dirent-name [(allocator (ptr Allocator)) (entry (ptr i8))] (-> (slice u8))
+(defn dirent-name [(allocator (dyn Allocator)) (entry (ptr i8))] (-> (slice u8))
   (let [bytes (primitive/cast (ptr u8) entry)
         start (primitive/index bytes DIRENT_NAME_OFFSET)
         (mut length) 0]
@@ -58,7 +58,7 @@
 
 ;; Every name in `path`, excluding `.` and `..`. An unopenable directory is an
 ;; empty list, not an error: "there are no factories here" is a normal state.
-(defn entries [(allocator (ptr Allocator)) (path (slice u8))] (-> (ArrayList (slice u8)))
+(defn entries [(allocator (dyn Allocator)) (path (slice u8))] (-> (ArrayList (slice u8)))
   (let [(mut names) (al-new [(slice u8)] allocator)
         handle (opendir (str->cstr allocator path))]
     (when (!= (primitive/cast i64 handle) 0)
@@ -74,7 +74,7 @@
       0)
     (load names)))
 
-(defn entries-with-suffix [(allocator (ptr Allocator))
+(defn entries-with-suffix [(allocator (dyn Allocator))
                            (path (slice u8))
                            (suffix (slice u8))] (-> (ArrayList (slice u8)))
   (let [all (entries allocator path)
@@ -93,16 +93,16 @@
                 (set! i (+ (load i) 1)))))
     (load matched)))
 
-(defn exists? [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
+(defn exists? [(allocator (dyn Allocator)) (path (slice u8))] (-> bool)
   (= (primitive/cast i64 (access (str->cstr allocator path) 0)) 0))
 
-(defn make-dir [(allocator (ptr Allocator)) (path (slice u8)) (mode i64)] (-> i64)
+(defn make-dir [(allocator (dyn Allocator)) (path (slice u8)) (mode i64)] (-> i64)
   (primitive/cast i64 (mkdir (str->cstr allocator path) (primitive/cast u32 mode))))
 
 ;; A file's size without reading it or laying out `struct stat`, whose fields
 ;; move between platforms. Returns -1 when the file cannot be opened, which is
 ;; how a caller distinguishes "not there yet" from "empty".
-(defn file-size [(allocator (ptr Allocator)) (path (slice u8))] (-> i64)
+(defn file-size [(allocator (dyn Allocator)) (path (slice u8))] (-> i64)
   (let [fd (os/open (str->cstr allocator path) 0)]
     (if (< (primitive/cast i64 fd) 0)
         -1
@@ -116,7 +116,7 @@
 ;; line between them.
 ;;
 ;; Darwin: O_WRONLY 1, O_APPEND 8, O_CREAT 512.
-(defn append-line! [(allocator (ptr Allocator)) (path (slice u8)) (text (slice u8))] (-> bool)
+(defn append-line! [(allocator (dyn Allocator)) (path (slice u8)) (text (slice u8))] (-> bool)
   (let [c-path (str->cstr allocator path)
         ;; coil.os already declares open with the C variadic signature; reusing
         ;; it keeps one declaration of one symbol.

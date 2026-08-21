@@ -39,7 +39,7 @@
   (let [spread (% (str-hash root) 200)]
     (+ 8790 (if (< spread 0) (- 0 spread) spread))))
 
-(defn base-url [(a (ptr Allocator)) (svc (ptr Service)) (path (slice u8))] (-> (slice u8))
+(defn base-url [(a (dyn Allocator)) (svc (ptr Service)) (path (slice u8))] (-> (slice u8))
   (let [(mut out) (sb-new a)]
     (sb-push-str! (mut out) "http://127.0.0.1:")
     (sb-push-str! (mut out) (dec-str (.port svc)))
@@ -49,25 +49,30 @@
 ;; The headers must outlive this call, so they come from the allocator and not
 ;; from this frame: a slice into a returned stack array is a dangling pointer
 ;; that happens to work until it does not.
-(defn auth-headers [(a (ptr Allocator)) (svc (ptr Service))] (-> (slice http/Header))
-  (let [h (unwrap-ptr [http/Header] (alloc-slice [http/Header] a 2))
-        (mut bearer) (sb-new a)]
-    (sb-push-str! (mut bearer) "Bearer ")
-    (sb-push-str! (mut bearer) (.token svc))
-    (set! (.name (primitive/index h 0)) "Authorization")
-    (set! (.value (primitive/index h 0)) (sb-finish! (mut bearer)))
-    (set! (.name (primitive/index h 1)) "Content-Type")
-    (set! (.value (primitive/index h 1)) "application/json")
-    (slice-new [http/Header] h 2)))
+(defn auth-headers [(a (dyn Allocator)) (svc (ptr Service))] (-> (slice http/Header))
+  (match (alloc [http/Header] a 2)
+    (None [] (do (oom-at c"coilgui.service.auth-headers" (primitive/imul 2 (primitive/sizeof http/Header)))
+                 (slice-new [http/Header] (primitive/cast (ptr http/Header) 0) 0)))
+    (Some [headers]
+          (do
+            (let [h (slice-data headers)
+                  (mut bearer) (sb-new a)]
+              (sb-push-str! (mut bearer) "Bearer ")
+              (sb-push-str! (mut bearer) (.token svc))
+              (set! (.name (primitive/index h 0)) "Authorization")
+              (set! (.value (primitive/index h 0)) (sb-finish! (mut bearer)))
+              (set! (.name (primitive/index h 1)) "Content-Type")
+              (set! (.value (primitive/index h 1)) "application/json"))
+            headers))))
 
 ;; One request. A non-2xx status is a normal answer, not a failure: the service
 ;; reports refusals and validation errors as JSON bodies worth showing.
-(defn ask [(a (ptr Allocator))
+(defn ask [(a (dyn Allocator))
            (svc (ptr Service))
            (method (slice u8))
            (path (slice u8))
            (body (slice u8))] (-> (Option http/Response))
-  (let [req (alloc/stack http/Request)]
+  (let [req (primitive/alloc-stack http/Request)]
     (set! (.method req) method)
     (set! (.url req) (base-url a svc path))
     (set! (.headers req) (auth-headers a svc))
@@ -82,7 +87,7 @@
       (Err [e] (None)))))
 
 ;; Is a service already answering on this port with this token?
-(defn probe [(a (ptr Allocator)) (svc (ptr Service))] (-> bool)
+(defn probe [(a (dyn Allocator)) (svc (ptr Service))] (-> bool)
   (match (ask a svc "GET" "/v1/tools" "")
     (Some [r]
           (let [got r]
@@ -91,14 +96,14 @@
 
 ;; A token for this process only. Not a secret against a determined local
 ;; attacker; it is what keeps a stray curl from driving the agent.
-(defn make-token [(a (ptr Allocator)) (seed i64)] (-> (slice u8))
+(defn make-token [(a (dyn Allocator)) (seed i64)] (-> (slice u8))
   (let [(mut out) (sb-new a)]
     (sb-push-str! (mut out) "gui-")
     (sb-push-str! (mut out) (dec-str seed))
     (sb-finish! (mut out))))
 
 (defn init! [(svc (ptr Service))
-             (a (ptr Allocator))
+             (a (dyn Allocator))
              (root (slice u8))
              (port i64)
              (seed i64)] (-> i64)
@@ -121,7 +126,9 @@
 
 ;; Start the service if nothing is answering yet. The journal it writes is this
 ;; app's conversation history and outlives the process.
-(defn start! [(a (ptr Allocator)) (svc (ptr Service)) (spawn (fnptr c [(ptr Allocator) (slice u8)] i64))] (-> i64)
+(defn start! [(a (dyn Allocator))
+              (svc (ptr Service))
+              (spawn (fnptr c [(ref (dyn Allocator)) (slice u8)] i64))] (-> i64)
   (if (probe a svc)
       (do (set! (.ready svc) true) 0)
       (let [(mut cmd) (sb-new a)]
